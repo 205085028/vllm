@@ -33,7 +33,7 @@ from vllm.utils import random_uuid
 
 try:
     import fastchat
-    from fastchat.conversation import Conversation, SeparatorStyle
+    from fastchat.conversation import Conversation, SeparatorStyle, get_conv_template, conv_templates
     from fastchat.model.model_adapter import get_conversation_template
     _fastchat_available = True
 except ImportError:
@@ -43,6 +43,7 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 logger = init_logger(__name__)
 served_model = None
+conv_template = None
 app = fastapi.FastAPI()
 engine = None
 
@@ -80,7 +81,11 @@ async def get_gen_prompt(request) -> str:
             f"fastchat version is low. Current version: {fastchat.__version__} "
             "Please upgrade fastchat to use: `$ pip install -U fschat`")
 
-    conv = get_conversation_template(request.model)
+    if conv_template is None:
+        conv = get_conversation_template(request.model)
+    else:
+        conv = get_conv_template(conv_template)
+
     conv = Conversation(
         name=conv.name,
         system_template=conv.system_template,
@@ -99,7 +104,7 @@ async def get_gen_prompt(request) -> str:
         prompt = request.messages
     else:
         for message in request.messages:
-            msg_role = message["role"]
+            msg_role = message["role"].lower()
             if msg_role == "system":
                 conv.system_message = message["content"]
             elif msg_role == "user":
@@ -668,6 +673,14 @@ if __name__ == "__main__":
                         "specified, the model name will be the same as "
                         "the huggingface name.")
 
+    if _fastchat_available:
+        parser.add_argument("--conv-template",
+                            type=str,
+                            default=None,
+                            choices=list(sorted(conv_templates.keys())),
+                            help="The conversation prompt template used in the chat completion API. If not "
+                            "specified, will be automatically selected based on the model name.")
+
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
@@ -681,6 +694,7 @@ if __name__ == "__main__":
 
     logger.info(f"args: {args}")
 
+    conv_template = args.conv_template
     if args.served_model_name is not None:
         served_model = args.served_model_name
     else:
