@@ -1,5 +1,10 @@
 import asyncio
+import json
+import os
+import shutil
+
 from http import HTTPStatus
+from pathlib import Path
 from typing import Dict, List, Optional, Union
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -21,6 +26,7 @@ class OpenAIServing:
 
         self.max_model_len = 0
         self.tokenizer = None
+        self.tokenizer_jsons = None
 
         try:
             event_loop = asyncio.get_running_loop()
@@ -42,6 +48,35 @@ class OpenAIServing:
             engine_model_config.tokenizer,
             tokenizer_mode=engine_model_config.tokenizer_mode,
             trust_remote_code=engine_model_config.trust_remote_code)
+
+        # tokenizer json required to be informed
+        self.tokenizer_jsons = self._get_tokenizer_jsons()
+
+    def _get_tokenizer_jsons(self) -> Dict[str, Dict]:
+        """Get tokenizer jsons been used"""
+        CURRENT_DIR = os.path.dirname(__file__)
+        EPHIMERAL_FOLDER_NAME = "tmp_tokenizer"
+        TOKENIZER_EPHIMERAL_PATH = Path(
+            os.path.join(CURRENT_DIR, EPHIMERAL_FOLDER_NAME))
+
+        # save tokenizer files in ephimeral folder
+        self.tokenizer.save_pretrained(TOKENIZER_EPHIMERAL_PATH.absolute())
+        tmp_list = [i for i in TOKENIZER_EPHIMERAL_PATH.glob("*.json")]
+
+        # populate tokenizer json
+        tokenizer_jsons = {}
+        for json_path in tmp_list:
+            with open(json_path) as json_file:
+                filename = json_path.stem
+                tokenizer_jsons[filename] = json.load(json_file)
+        try:
+            shutil.rmtree(TOKENIZER_EPHIMERAL_PATH)
+        except OSError as e:
+            raise RuntimeError(
+                f"Error removing '{TOKENIZER_EPHIMERAL_PATH.name}' directory: {e}"
+            ) from e
+
+        return tokenizer_jsons
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
