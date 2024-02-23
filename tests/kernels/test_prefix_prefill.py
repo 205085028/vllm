@@ -97,10 +97,12 @@ def test_contexted_kv_attention(
                 end_loc = start_loc + block_size
             start_slot = block_table[i, block_id] * block_size
             end_slot = start_slot + end_loc - start_loc
-            k_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
-                key[start_loc:end_loc])
-            v_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
-                value[start_loc:end_loc])
+            k_cache.view(-1, num_kv_heads,
+                         head_size)[start_slot:end_slot].copy_(
+                             key[start_loc:end_loc])
+            v_cache.view(-1, num_kv_heads,
+                         head_size)[start_slot:end_slot].copy_(
+                             value[start_loc:end_loc])
             cur_ctx += block_size
             block_id += 1
     # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
@@ -133,15 +135,13 @@ def test_contexted_kv_attention(
         # heads.
         #
         # see also: vllm/model_executor/layers/attention.py
-        query = query.view(query.shape[0], num_kv_heads,
-                           num_queries_per_kv, query.shape[-1])
+        query = query.view(query.shape[0], num_kv_heads, num_queries_per_kv,
+                           query.shape[-1])
         key = key[:, :, None, :].expand(key.shape[0], num_kv_heads,
-                                        num_queries_per_kv,
-                                        key.shape[-1])
-        value = value[:, :, None, :].expand(value.shape[0],
-                                            num_kv_heads,
-                                            num_queries_per_kv,
-                                            value.shape[-1])
+                                        num_queries_per_kv, key.shape[-1])
+        value = value[:, :,
+                      None, :].expand(value.shape[0], num_kv_heads,
+                                      num_queries_per_kv, value.shape[-1])
     query = query.unsqueeze(0)
     key = key.unsqueeze(0)
     value = value.unsqueeze(0)

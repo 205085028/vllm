@@ -146,14 +146,17 @@ class PagedAttention(nn.Module):
                     # heads.
                     # TODO(woosuk): Use MQA/GQA kernels for higher performance.
                     query = query.view(query.shape[0], self.num_kv_heads,
-                                    self.num_queries_per_kv, query.shape[-1])
-                    key = key[:, :, None, :].expand(key.shape[0], self.num_kv_heads,
-                                                    self.num_queries_per_kv,
-                                                    key.shape[-1])
-                    value = value[:, :, None, :].expand(value.shape[0],
-                                                        self.num_kv_heads,
-                                                        self.num_queries_per_kv,
-                                                        value.shape[-1])
+                                       self.num_queries_per_kv,
+                                       query.shape[-1])
+                    key = key[:, :,
+                              None, :].expand(key.shape[0], self.num_kv_heads,
+                                              self.num_queries_per_kv,
+                                              key.shape[-1])
+                    value = value[:, :,
+                                  None, :].expand(value.shape[0],
+                                                  self.num_kv_heads,
+                                                  self.num_queries_per_kv,
+                                                  value.shape[-1])
 
                 # Set attention bias if not provided. This typically happens at
                 # the very attention layer of every iteration.
