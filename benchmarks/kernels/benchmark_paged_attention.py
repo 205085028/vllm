@@ -5,6 +5,11 @@ import time
 
 import torch
 
+try:
+    from flash_attn import flash_attn_with_kvcache
+except ImportError:
+    flash_attn_with_kvcache = None, None
+
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, create_kv_caches_with_random
 from vllm._C import ops
 
@@ -33,6 +38,14 @@ def main(
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
 
+    use_flash_attn = version == "flash-attn"
+    if use_flash_attn:
+        if dtype not in [torch.half, torch.bfloat16
+                         ] or kv_cache_dtype != "auto":
+            raise ValueError(
+                "skip: flash-attn requires dtype and kv_cache_dtype to be half or bfloat16"
+            )
+
     scale = float(1.0 / (head_size**0.5))
     query = torch.empty(num_seqs,
                         num_query_heads,
@@ -53,6 +66,8 @@ def main(
     context_lens = torch.tensor(context_lens, dtype=torch.int, device=device)
 
     # Create the block tables.
+    if use_flash_attn:
+        block_size = ((block_size + 256 - 1) // 256) * 256
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
     block_tables = []
     for _ in range(num_seqs):
@@ -64,14 +79,16 @@ def main(
     block_tables = torch.tensor(block_tables, dtype=torch.int, device=device)
 
     # Create the KV cache.
-    key_caches, value_caches = create_kv_caches_with_random(NUM_BLOCKS,
-                                                            block_size,
-                                                            1,
-                                                            num_kv_heads,
-                                                            head_size,
-                                                            kv_cache_dtype,
-                                                            dtype,
-                                                            device=device)
+    key_caches, value_caches = create_kv_caches_with_random(
+        NUM_BLOCKS,
+        block_size,
+        1,
+        num_kv_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        device=device,
+        use_flash_attn=use_flash_attn)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Prepare for the paged attention kernel.
@@ -131,6 +148,17 @@ def main(
                     alibi_slopes,
                     kv_cache_dtype,
                 )
+            elif version == "flash-attn":
+                flash_attn_with_kvcache(
+                    q=query.reshape(num_seqs, -1, *query.shape[1:]),
+                    k_cache=key_cache,
+                    v_cache=value_cache,
+                    cache_seqlens=context_lens,
+                    block_table=block_tables,
+                    softmax_scale=scale,
+                    causal=True,
+                    alibi_slopes=alibi_slopes,
+                )
             else:
                 raise ValueError(f"Invalid version: {version}")
         torch.cuda.synchronize()
@@ -158,7 +186,7 @@ if __name__ == '__main__':
         description="Benchmark the paged attention kernel.")
     parser.add_argument("--version",
                         type=str,
-                        choices=["v1", "v2"],
+                        choices=["v1", "v2", "flash-attn"],
                         default="v2")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--context-len", type=int, default=4096)
