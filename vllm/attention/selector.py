@@ -39,8 +39,8 @@ def _can_use_flash_attn(dtype: torch.dtype) -> bool:
         return False
 
     try:
-        import flash_attn  # noqa: F401
+        import vllm_flash_attn  # noqa: F401
     except ImportError:
-        logger.info("flash_attn is not found.")
+        logger.info("vllm_flash_attn is not found.")
         return False
     return True
