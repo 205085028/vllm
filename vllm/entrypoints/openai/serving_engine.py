@@ -8,7 +8,8 @@ from pydantic import conint
 
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              CompletionRequest, ErrorResponse,
+                                              CompletionRequest,
+                                              EmbeddingRequest, ErrorResponse,
                                               LogProbs, ModelCard, ModelList,
                                               ModelPermission)
 from vllm.logger import init_logger
@@ -165,7 +166,8 @@ class OpenAIServing:
 
     def _validate_prompt_and_tokenize(
             self,
-            request: Union[ChatCompletionRequest, CompletionRequest],
+            request: Union[ChatCompletionRequest, CompletionRequest,
+                           EmbeddingRequest],
             prompt: Optional[str] = None,
             prompt_ids: Optional[List[int]] = None,
             truncate_prompt_tokens: Optional[conint(ge=1)] = None
@@ -188,6 +190,17 @@ class OpenAIServing:
             input_ids = prompt_ids
 
         token_num = len(input_ids)
+
+        # Note: EmbeddingRequest doesn't have max_tokens
+        if (isinstance(request, EmbeddingRequest)
+                and token_num > self.max_model_len):
+            raise ValueError(
+                f"This model's maximum context length is "
+                f"{self.max_model_len} tokens. However, you requested "
+                f"{token_num} tokens in the messages, "
+                f"Please reduce the length of the messages.", )
+        elif isinstance(request, EmbeddingRequest):
+            return input_ids
 
         if request.max_tokens is None:
             request.max_tokens = self.max_model_len - token_num
