@@ -262,7 +262,7 @@ class GPTBigCodeForCausalLM(nn.Module):
         if lora_config: 
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size, config.vocab_size)
-        self.sampler = Sampler(self.unpadded_vocab_size, config.vocab_size)
+        self.sampler = Sampler()
 
     def forward(
         self,
