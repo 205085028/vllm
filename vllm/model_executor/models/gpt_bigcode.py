@@ -25,6 +25,7 @@ from torch import nn
 from transformers import GPTBigCodeConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import LoRAConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
@@ -40,7 +41,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.config import LoRAConfig
 
 
 class GPTBigCodeAttention(nn.Module):
@@ -188,16 +188,19 @@ class GPTBigCodeModel(nn.Module):
         self,
         config: GPTBigCodeConfig,
         linear_method: Optional[LinearMethodBase] = None,
-        lora_config:Optional[LoRAConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config = config
         assert not config.add_cross_attention
 
         self.embed_dim = config.hidden_size
-        lora_vocab = (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1)) if lora_config else 0
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
-        self.wte = VocabParallelEmbedding(self.vocab_size, self.embed_dim, org_num_embeddings=config.vocab_size)
+        self.wte = VocabParallelEmbedding(self.vocab_size,
+                                          self.embed_dim,
+                                          org_num_embeddings=config.vocab_size)
         self.max_position_embeddings = config.max_position_embeddings
         self.wpe = nn.Embedding(self.max_position_embeddings, self.embed_dim)
         self.h = nn.ModuleList([
@@ -226,14 +229,10 @@ class GPTBigCodeModel(nn.Module):
 
 
 class GPTBigCodeForCausalLM(nn.Module):
-    packed_modules_mapping = {
-        "c_attn": [
-            "c_attn"
-        ]
-    }
+    packed_modules_mapping = {"c_attn": ["c_attn"]}
 
     supported_lora_modules = [
-        "c_fc",  
+        "c_fc",
         "c_proj",
         "wte",
         "lm_head",
@@ -256,12 +255,15 @@ class GPTBigCodeForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        self.transformer = GPTBigCodeModel(config, linear_method, lora_config=lora_config)
+        self.transformer = GPTBigCodeModel(config,
+                                           linear_method,
+                                           lora_config=lora_config)
         self.lm_head_weight = self.transformer.wte.weight
         self.unpadded_vocab_size = config.vocab_size
-        if lora_config: 
+        if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size, config.vocab_size)
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size)
         self.sampler = Sampler()
 
     def forward(
