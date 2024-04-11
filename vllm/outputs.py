@@ -26,6 +26,7 @@ class CompletionOutput:
 
     def __init__(
         self,
+        seq_id: int,
         index: int,
         text: str,
         token_ids: List[int],
@@ -35,6 +36,7 @@ class CompletionOutput:
         stop_reason: Union[int, str, None] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
+        self.seq_id = seq_id
         self.index = index
         self.text = text
         self.token_ids = token_ids
@@ -113,7 +115,7 @@ class RequestOutput:
         # logprobs are not requested.
         include_logprobs = seq_group.sampling_params.logprobs is not None
         outputs = [
-            CompletionOutput(seqs.index(seq), seq.output_text,
+            CompletionOutput(seq.seq_id, seqs.index(seq), seq.output_text,
                              seq.get_output_token_ids(),
                              seq.get_cumulative_logprob(),
                              seq.output_logprobs if include_logprobs else None,

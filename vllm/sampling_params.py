@@ -165,6 +165,7 @@ class SamplingParams:
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.logits_processors = logits_processors
         self.include_stop_str_in_output = include_stop_str_in_output
+        self.has_aici = False
         self.truncate_prompt_tokens = truncate_prompt_tokens
         self._verify_args()
         if self.use_beam_search:

@@ -12,6 +12,7 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceData, SequenceGroupOutput,
                            SequenceOutput)
+from pyaici.comms import AiciRunner
 
 
 class Sampler(nn.Module):
@@ -109,6 +110,25 @@ def _apply_min_tokens_penalty(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
+    aici_runner = AiciRunner.instance
+    if aici_runner:
+        mid_results, arr = aici_runner.recv_logit_bias()
+        bias = torch.from_numpy(arr).to(logits.device).to(logits.dtype)
+        if bias.shape[0] > 0:
+            logits_row_idx = 0
+            for seq_ids, sampling_params in sampling_metadata.seq_groups:
+                if sampling_params.has_aici:
+                    for id in seq_ids:
+                        r = mid_results.get(id)
+                        if r and len(r.branches) >= 1:
+                            assert len(r.branches) <= 1, "Only one branch is supported"
+                            mask = r.branches[0].mask
+                            if mask is not None:
+                                logits[logits_row_idx] += bias[mask]
+                        logits_row_idx += 1
+                else:
+                    logits_row_idx += len(seq_ids)
+
     # list of indices in logits that will be set to -inf
     logits_to_penalize = []
     start_idx = 0
