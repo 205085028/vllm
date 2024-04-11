@@ -65,9 +65,13 @@ class BlockTable:
         """
         return cdiv(len(token_ids), block_size)
 
+    def get_blocks(self) -> Optional[List[Block]]:
+        return self._blocks
+
     def allocate(self,
                  token_ids: List[int],
-                 device: Device = Device.GPU) -> None:
+                 device: Device = Device.GPU,
+                 by_block: bool = False) -> Optional[Block]:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
         This method allocates the required number of blocks to store the given
@@ -77,13 +81,23 @@ class BlockTable:
             token_ids (List[int]): The sequence of token IDs to be stored.
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
+            by_block (bool, optional): whether we are allocate block by block.
+            Set to True when doing cache swapping. Defaults to False. 
         """
-        assert not self._is_allocated
+        assert not self._is_allocated or by_block
         assert token_ids
-        self._blocks = self._allocate_blocks_for_token_ids(prev_block=None,
-                                                           token_ids=token_ids,
-                                                           device=device)
-        self._num_full_slots = len(token_ids)
+        blocks = self._allocate_blocks_for_token_ids(prev_block=None,
+                                                     token_ids=token_ids,
+                                                     device=device)
+        self._num_full_slots += len(token_ids)
+        if not (by_block and self._is_allocated):
+            self._blocks = blocks
+        else:
+            # Note: whenever we call allocate with by_block set to True,
+            # because of swapping, the tokens must fit in a block
+            assert len(blocks) == 1
+            self._blocks.append(blocks[0])
+        return blocks[0]
 
     def append_token_ids(self,
                          token_ids: List[int],
@@ -179,6 +193,17 @@ class BlockTable:
             self._allocator.free(block)
         self._blocks = None
 
+    def swap(self, destination_device: Device) -> "BlockTable":
+        new_block_table = BlockTable(
+            block_size=self._block_size,
+            block_allocator=self._allocator,
+        )
+        for src_block in self.get_blocks():
+            self._allocator.update_seq_swap_out_block_mapping(
+                src_block, new_block_table, destination_device)
+            self._allocator.free(src_block)
+        return new_block_table
+
     @property
     def physical_block_ids(self) -> List[int]:
         """Returns a list of physical block indices for the blocks in the
@@ -250,6 +275,10 @@ class BlockTable:
         return self._blocks is not None
 
     @property
+    def _num_touched_blocks(self) -> int:
+        return len(self._blocks)
+
+    @property
     def _num_empty_slots(self) -> int:
         assert self._is_allocated
         return len(self._blocks) * self._block_size - self._num_full_slots
@@ -289,3 +318,39 @@ class BlockTable:
         token_blocks = [token_ids[:first_chunk_size]] + chunk_list(
             token_ids[first_chunk_size:], self._block_size)
         return token_blocks
+
+    def get_num_cache_blocks_touched_by_swapping(self, token_ids: List[int],
+                                                 num_lookahead_slots: int,
+                                                 device: Device) -> int:
+        """Determine how many blocks will be "touched" by swapping in/out the 
+        token ids.
+
+        This is required for the scheduler to determine whether a sequence can
+        be swapped in/out.
+        """
+        all_token_ids = token_ids + [-1] * num_lookahead_slots
+        token_blocks = self._chunk_token_blocks_for_append(all_token_ids)
+        prev_block = None
+        num_blocks_touched = 0
+        for token_block in token_blocks:
+            block = self.block_allocator.mock_mutable(prev_block, token_block,
+                                                      device)
+            if not block.prefix_caching_allocator.is_block_cached(block):
+                num_blocks_touched += 1
+            prev_block = block
+        return num_blocks_touched
+
+    def get_num_naive_blocks_touched_by_swapping(self, token_ids: List[int],
+                                                 num_lookahead_slots: int,
+                                                 total_touched_blocks: int,
+                                                 block_set: set) -> None:
+        num_blocks_touched = self.get_num_blocks_touched_by_append_slots(
+            token_ids, num_lookahead_slots)
+        blocks = self.get_blocks()
+        if num_blocks_touched > len(blocks):
+            total_touched_blocks += 1
+        for block in blocks:
+            if not block.is_full:
+                total_touched_blocks += 1
+            else:
+                block_set.add(block.block_id)

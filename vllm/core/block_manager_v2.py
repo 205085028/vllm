@@ -3,6 +3,7 @@ from typing import Dict, List, Optional
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.core.block.interfaces import Block
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
@@ -175,7 +176,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
         )
-
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
         return new_cows
@@ -227,17 +227,96 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
     def can_swap_in(self, seq_group: SequenceGroup,
                     num_lookahead_slots: int) -> bool:
-        return False
+        """
+        We go through all sequence in seq group to get their number of blocks 
+        touched and sum them up to see whether there is enough memory to swap in
+        """
+        num_touched_blocks = 0
+
+        if self.enable_caching:
+            for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+                block_table = self.block_tables[seq.seq_id]
+                num_touched_blocks += (
+                    block_table.get_num_cache_blocks_touched_by_swapping(
+                        token_ids=seq.get_token_ids(),
+                        num_lookahead_slots=num_lookahead_slots,
+                        device=Device.GPU))
+        else:
+            # NOTE: for naive block, we go though all the sequence to collect
+            # a set of immutable block id, and accumulate number of isolated
+            # blocks (mutable ones and single block caused by lookahead). We
+            # sum them up at the end to get the final num_touched_blocks
+            # num_touched_blocks swap in op.
+            block_set = set()
+            for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+                block_table = self.block_tables[seq.seq_id]
+                block_table.get_num_naive_blocks_touched_by_swapping(
+                    token_ids=seq.get_token_ids(),
+                    num_lookahead_slots=num_lookahead_slots,
+                    total_touched_blocks=num_touched_blocks,
+                    block_set=block_set)
+            num_touched_blocks += len(block_set)
+
+        num_free_blocks = self.block_allocator.get_num_free_blocks(Device.GPU)
+        return num_free_blocks - num_touched_blocks >= self.watermark_blocks
 
     def swap_in(self, seq_group: SequenceGroup,
                 num_lookahead_slots: int) -> Dict[int, int]:
-        raise NotImplementedError
+        for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+            block_table = self.block_tables[seq.seq_id]
+            new_block_table = block_table.swap(destination_device=Device.GPU)
+            self.block_tables[seq.seq_id] = new_block_table
+            self.append_slots(seq=seq, num_lookahead_slots=num_lookahead_slots)
+
+        # NOTE: since the memory operation in physical blocks need the
+        # relative position of CPU block to its starting address, here
+        # we need to shift the block id of cpu block back to its relative
+        # position within CPU cache.
+        mapping = self.block_allocator.get_and_reset_swaps()
+        block_number_mapping = {
+            cpu_block_id - self.num_total_gpu_blocks: gpu_block_id
+            for cpu_block_id, gpu_block_id in mapping.items()
+        }
+        return block_number_mapping
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
-        return False
+        num_touched_blocks = 0
+
+        if self.enable_caching:
+            for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+                block_table = self.block_tables[seq.seq_id]
+                num_touched_blocks += (
+                    block_table.get_num_cache_blocks_touched_by_swapping(
+                        token_ids=seq.get_token_ids(),
+                        num_lookahead_slots=0,
+                        device=Device.CPU))
+        else:
+            block_set = set()
+            for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+                block_table = self.block_tables[seq.seq_id]
+                block_table.get_num_naive_blocks_touched_by_swapping(
+                    token_ids=seq.get_token_ids(),
+                    num_lookahead_slots=0,
+                    total_touched_blocks=num_touched_blocks,
+                    block_set=block_set)
+            num_touched_blocks += len(block_set)
+
+        return num_touched_blocks <= self.block_allocator.get_num_free_blocks(
+            Device.CPU)
 
     def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
-        raise NotImplementedError
+        mapping: Dict[Block, Block] = {}
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            block_table = self.block_tables[seq.seq_id]
+            new_block_table = block_table.swap(destination_device=Device.CPU)
+            self.block_tables[seq.seq_id] = new_block_table
+
+        mapping = self.block_allocator.get_and_reset_swaps()
+        block_number_mapping = {
+            gpu_block_id: cpu_block_id - self.num_total_gpu_blocks
+            for gpu_block_id, cpu_block_id in mapping.items()
+        }
+        return block_number_mapping
 
     def get_num_free_gpu_blocks(self) -> int:
         return self.block_allocator.get_num_free_blocks(Device.GPU)

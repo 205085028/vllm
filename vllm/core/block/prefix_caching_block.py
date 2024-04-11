@@ -1,4 +1,6 @@
 """Token blocks."""
+from __future__ import annotations
+
 from itertools import takewhile
 from os.path import commonprefix
 from typing import Dict, Iterable, List, Optional
@@ -162,6 +164,24 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # No block available in hashless allocator, nor in unused cache blocks.
         raise BlockAllocator.NoFreeBlocksError()
 
+    def mock_mutable(
+        self,
+        prev_block: Optional[Block],
+        token_ids: List[int],
+    ) -> Block:
+        """Mock a new mutable block, linked to the previous block, to help with
+        content hash calculation.
+
+        Args:
+            prev_block (Optional[Block]): The previous block in the sequence. If
+                None, then the block to be allocated is the first block in the
+                sequence.
+
+        Returns:
+            Block: The newly allocated mutable block.
+        """
+        return self._hashless_allocator.mock_mutable(prev_block, token_ids)
+
     def _incr_refcount_cached_block(self, content_hash: int,
                                     block_id: BlockId) -> None:
         refcount = self._refcounter.incr(block_id)
@@ -197,6 +217,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             assert block.content_hash in self._cached_blocks
             self._unused_cached_blocks[block.content_hash] = block_id
 
+    def reference(self, block_id: int) -> None:
+        self._refcounter.incr(block_id)
+
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
         memory as the original sequence.
@@ -229,14 +252,19 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         return forked_blocks
 
     def get_num_free_blocks(self) -> int:
-        # The number of free blocks is the number of hashless free blocks
-        # plus the number of hashful blocks that are unused.
+        # The number of free blocks is the number of hashless free
+        # blocks plus the number of hashful blocks that are unused.
         return self._hashless_allocator.get_num_free_blocks() + len(
             self._unused_cached_blocks)
 
     @property
     def all_block_ids(self) -> frozenset[int]:
         return self._hashless_allocator.all_block_ids
+
+    def is_block_cached(self, block: "PrefixCachingBlock") -> bool:
+        if block.content_hash not in self._cached_blocks:
+            return True
+        return False
 
     def promote_to_immutable_block(self,
                                    block: "PrefixCachingBlock") -> BlockId:

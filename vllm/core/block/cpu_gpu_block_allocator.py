@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 from typing import Dict, List, Optional
 
+from vllm.core.block.block_table import BlockTable
 from vllm.core.block.interfaces import (Block, BlockAllocator,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
@@ -90,11 +93,8 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             gpu_block_allocator=gpu_allocator,
         )
 
-    def __init__(
-        self,
-        cpu_block_allocator: BlockAllocator,
-        gpu_block_allocator: BlockAllocator,
-    ):
+    def __init__(self, cpu_block_allocator: BlockAllocator,
+                 gpu_block_allocator: BlockAllocator):
         assert not (
             cpu_block_allocator.all_block_ids
             & gpu_block_allocator.all_block_ids
@@ -106,6 +106,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         }
 
         self._block_ids_to_allocator = {}
+        self._swap_mapping = {}
         for _, allocator in self._allocators.items():
             for block_id in allocator.all_block_ids:
                 self._block_ids_to_allocator[block_id] = allocator
@@ -142,6 +143,31 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         """
         return self._allocators[device].allocate_immutable(
             prev_block, token_ids)
+
+    def mock_mutable(self, prev_block: Optional[Block], token_ids: List[int],
+                     device: Device) -> Block:
+        """Mock a new mutable block, linked to the previous block, to help with
+        content hash calculation.
+
+        Args:
+            prev_block (Optional[Block]): The previous block in the sequence. If
+                None, then the block to be allocated is the first block in the
+                sequence.
+
+        Returns:
+            Block: The newly allocated mutable block.
+        """
+        return self._allocators[device].mock_mutable(prev_block, token_ids)
+
+    def reference(self, block_id: int) -> None:
+        """Notify the device aware allocator there is new sequence reference
+        the given block.
+
+        Args:
+            block (Block): The block to be referenced.
+        """
+        allocator = self._block_ids_to_allocator[block_id]
+        return allocator.reference(block_id)
 
     def free(self, block: Block) -> None:
         """Frees the memory occupied by the given block.
@@ -204,3 +230,20 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
     def all_block_ids(self) -> frozenset[int]:
         return frozenset(self._block_ids_to_allocator.keys())
+
+    def update_seq_swap_out_block_mapping(self, block: Block,
+                                          block_table: BlockTable,
+                                          destination_device: Device) -> None:
+        if block.block_id in self._swap_mapping:
+            dest_block_id = self._swap_mapping[block.block_id]
+            self.reference(dest_block_id)
+        else:
+            dest_block = block_table.allocate(token_ids=block.token_ids,
+                                              device=destination_device,
+                                              by_block=True)
+            self._swap_mapping[block.block_id] = dest_block.block_id
+
+    def get_and_reset_swaps(self) -> dict:
+        mapping = self._swap_mapping.copy()
+        self._swap_mapping.clear()
+        return mapping
