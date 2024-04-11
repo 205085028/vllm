@@ -3,6 +3,7 @@ import json
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Dict, List, Optional, Union
+import os
 
 from pydantic import conint
 
@@ -149,6 +150,8 @@ class OpenAIServing:
             return
         if request.model in [lora.lora_name for lora in self.lora_requests]:
             return
+        elif request.lora_request and os.path.exists(request.lora_request.get("lora_local_path")):
+            return
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
@@ -157,11 +160,22 @@ class OpenAIServing:
     def _maybe_get_lora(self, request) -> Optional[LoRARequest]:
         if request.model == self.served_model:
             return
+
+        # if this lora adapter was already encountered, use it. otherwise, load a new adapter from disk
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
                 return lora
+
+        if request.lora_request and os.path.exists(request.lora_request.get("lora_local_path")):
+            new_lora = LoRARequest(
+                lora_name=request.model,
+                lora_local_path=request.lora_request.get("lora_local_path")
+            )
+            self.lora_requests.append(new_lora)
+            return new_lora
+
         # if _check_model has been called earlier, this will be unreachable
-        raise ValueError("The model `{request.model}` does not exist.")
+        raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
             self,
