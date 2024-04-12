@@ -1,9 +1,8 @@
 import logging
 import sys
 
-from vllm.logger import (
-    _DATE_FORMAT, _FORMAT, NewLineFormatter, init_logger
-)
+from vllm.logger import _DATE_FORMAT, _FORMAT, init_logger
+from vllm.logging import NewLineFormatter
 
 
 def test_vllm_root_logger_configuration():
