@@ -115,7 +115,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
-@app.post("/v1/embedding")
+@app.post("/v1/embeddings")
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     generator = await openai_serving_embedding.create_embedding(
         request, raw_request)
