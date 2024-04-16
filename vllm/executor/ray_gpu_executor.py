@@ -3,7 +3,8 @@ import copy
 import os
 import pickle
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import (TYPE_CHECKING, Any, Awaitable, Dict, List, Optional, Set,
+                    Tuple, Union)
 
 from vllm.engine.ray_utils import RayWorkerVllm, ray
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
@@ -35,6 +36,10 @@ class RayGPUExecutor(ExecutorBase):
 
         assert self.parallel_config.worker_use_ray
         placement_group = self.parallel_config.placement_group
+
+        # This is non-None when the execute model loop is running
+        # in the parallel workers
+        self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
 
         # Disable Ray usage stats collection.
         ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
@@ -242,19 +247,30 @@ class RayGPUExecutor(ExecutorBase):
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
                       blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
-        all_outputs = self._run_workers(
-            "execute_model",
-            driver_kwargs={
-                "seq_group_metadata_list": seq_group_metadata_list,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-            },
-            use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
+        if self.parallel_worker_tasks is None:
+            # Start model execution loop running in the parallel workers
+            self.parallel_worker_tasks = self._run_workers(
+                "start_worker_execution_loop",
+                remote_workers_only_async=True,
+                use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
 
         # Only the driver worker returns the sampling results.
-        output = all_outputs[0]
-        return output
+        return self.driver_worker.execute_model(
+            seq_group_metadata_list=seq_group_metadata_list,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy)
+
+    def stop_remote_worker_execution_loop(self) -> None:
+        if self.parallel_worker_tasks is None:
+            return
+
+        self.driver_worker.execute_model()
+        parallel_worker_tasks = self.parallel_worker_tasks
+        self.parallel_worker_tasks = None
+        # Ensure that workers exit model loop cleanly
+        # (this will raise otherwise)
+        ray.get(parallel_worker_tasks)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
@@ -277,8 +293,7 @@ class RayGPUExecutor(ExecutorBase):
         self,
         method: str,
         *args,
-        driver_args: Optional[Tuple[Any, ...]] = None,
-        driver_kwargs: Optional[Dict[str, Any]] = None,
+        remote_workers_only_async: bool = False,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
         **kwargs,
@@ -294,6 +309,7 @@ class RayGPUExecutor(ExecutorBase):
             # input. TODO(sang): Fix it.
             assert self.forward_dag is not None
             output_channels = self.forward_dag.execute(1)
+            ray_worker_outputs = []
         else:
             # Start the ray workers first.
             ray_worker_outputs = [
@@ -301,14 +317,13 @@ class RayGPUExecutor(ExecutorBase):
                 for worker in self.workers
             ]
 
-        if driver_args is None:
-            driver_args = args
-        if driver_kwargs is None:
-            driver_kwargs = kwargs
+        if remote_workers_only_async:
+            # Just return futures
+            return ray_worker_outputs
 
         # Start the driver worker after all the ray workers.
-        driver_worker_output = getattr(self.driver_worker,
-                                       method)(*driver_args, **driver_kwargs)
+        driver_worker_output = getattr(self.driver_worker, method)(*args,
+                                                                   **kwargs)
 
         # Get the results of the ray workers.
         if self.workers:
@@ -367,33 +382,6 @@ class RayGPUExecutor(ExecutorBase):
 
 class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
 
-    async def _run_workers_async(
-        self,
-        method: str,
-        *args,
-        driver_args: Optional[Tuple[Any, ...]] = None,
-        driver_kwargs: Optional[Dict[str, Any]] = None,
-        **kwargs,
-    ) -> Any:
-        """Runs the given method on all workers."""
-        coros = []
-
-        if driver_args is None:
-            driver_args = args
-        if driver_kwargs is None:
-            driver_kwargs = kwargs
-
-        # Run the driver worker asynchronously.
-        driver_executor = make_async(getattr(self.driver_worker, method))
-        coros.append(driver_executor(*driver_args, **driver_kwargs))
-
-        # Run the ray workers asynchronously.
-        for worker in self.workers:
-            coros.append(worker.execute_method.remote(method, *args, **kwargs))
-
-        all_outputs = await asyncio.gather(*coros)
-        return all_outputs
-
     async def execute_model_async(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -401,15 +389,32 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
     ) -> SamplerOutput:
-        all_outputs = await self._run_workers_async(
-            "execute_model",
-            driver_kwargs={
-                "seq_group_metadata_list": seq_group_metadata_list,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-            })
+        if self.parallel_worker_tasks is None:
+            # Start model execution loop running in the parallel workers
+            self.parallel_worker_tasks = asyncio.create_task(
+                self._start_worker_execution_loop())
 
         # Only the driver worker returns the sampling results.
-        output = all_outputs[0]
-        return output
+        return await make_async(self.driver_worker.execute_model)(
+            seq_group_metadata_list=seq_group_metadata_list,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy)
+
+    async def _start_worker_execution_loop(self):
+        coros = [
+            worker.execute_method.remote("start_worker_execution_loop")
+            for worker in self.workers
+        ]
+        return await asyncio.gather(*coros)
+
+    async def stop_remote_worker_execution_loop_async(self) -> None:
+        if self.parallel_worker_tasks is None:
+            return
+
+        await make_async(self.driver_worker.execute_model)()
+        parallel_worker_tasks = self.parallel_worker_tasks
+        self.parallel_worker_tasks = None
+        # Ensure that workers exit model loop cleanly
+        # (this will raise otherwise)
+        await parallel_worker_tasks
