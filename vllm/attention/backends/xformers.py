@@ -173,6 +173,7 @@ class XFormersImpl(AttentionImpl):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: AttentionMetadata[XFormersMetadata],
         kv_scale: float,
+        key_original: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -264,6 +265,21 @@ class XFormersImpl(AttentionImpl):
                 self.alibi_slopes,
                 kv_scale,
             )
+
+            # attention sinks: revert key in cache to pre-rotated state
+            use_attn_sinks = True
+            if use_attn_sinks:
+                if key_cache is not None and value_cache is not None:
+                    key_original = key_original.view(-1, self.num_kv_heads, self.head_size)
+                    PagedAttention.write_to_paged_cache(
+                        key_original,
+                        value,
+                        key_cache,
+                        value_cache,
+                        attn_metadata.slot_mapping,
+                        attn_metadata.kv_cache_dtype,
+                        kv_scale
+                    )
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)

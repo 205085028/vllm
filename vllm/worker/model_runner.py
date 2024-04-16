@@ -467,6 +467,15 @@ class ModelRunner:
                     sliding_window_blocks = (self.sliding_window //
                                              self.block_size)
                     block_table = block_table[-sliding_window_blocks:]
+                
+                use_attn_sinks = False
+                max_context_len = self.model_config.max_model_len
+                prompt_len = seq_data.get_prompt_len()
+                if use_attn_sinks and seq_len > max_context_len:
+                    blocks_to_ignore = (position - max_context_len) // self.block_size + 1
+                    # block_table[0] is attention sink
+                    block_table = [block_table[0]] + block_table[blocks_to_ignore + 1:]
+                
                 block_tables.append(block_table)
 
         # vLLM uses cuda graph only for decoding requests.
@@ -816,6 +825,8 @@ class ModelRunner:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_input
          ) = self.prepare_input_tensors(seq_group_metadata_list)
+
+        print(f"\texecute_model: {input_tokens}, {input_positions}")
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
