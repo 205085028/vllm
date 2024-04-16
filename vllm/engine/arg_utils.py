@@ -17,6 +17,7 @@ from vllm.utils import str_to_int_tuple
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
+    served_model_name: Optional[str] = None
     tokenizer: Optional[str] = None
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
@@ -437,7 +438,14 @@ class EngineArgs:
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
-        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
+        engine_args = cls(**{
+            attr: getattr(args, attr)
+            for attr in attrs if hasattr(args, attr)
+        })
+        if hasattr(args, "served_model_name"):
+            engine_args.served_model_name = args.served_model_name
+        else:
+            engine_args.served_model_name = args.model
         return engine_args
 
     def create_engine_config(self, ) -> EngineConfig:
@@ -448,7 +456,8 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.quantization_param_path, self.enforce_eager,
-            self.max_context_len_to_capture, self.max_logprobs)
+            self.max_context_len_to_capture, self.max_logprobs,
+            self.served_model_name)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
