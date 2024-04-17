@@ -5,11 +5,13 @@ from typing import Dict, Iterable, List, Optional
 
 from vllm.core.block.common import (CopyOnWriteTracker,
                                     get_all_blocks_recursively)
+from vllm.core.block.evictor import EvictionPolicy, Evictor, make_evictor
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 
 PrefixHash = int
 BlockId = int
+DEFAULT_LAST_ACCESSED_TIME = -1
 
 
 class PrefixCachingBlockAllocator(BlockAllocator):
@@ -34,6 +36,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         num_blocks: int,
         block_size: int,
         block_ids: Optional[Iterable[int]] = None,
+        eviction_policy: Optional[EvictionPolicy] = EvictionPolicy.LRU,
     ):
         # A mapping of prefix hash to block index. All blocks which have a
         # prefix hash will be in this dict, even if they have refcount 0.
@@ -44,6 +47,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # of self._cached_blocks.
         self._unused_cached_blocks: Dict[PrefixHash, BlockId] = {}
 
+        # A mapping of blockId to Block to track those cached blocks
+        self._blocks: Dict[BlockId, Block] = {}
+
         # An allocator for blocks that do not have prefix hashes.
         self._hashless_allocator = NaiveBlockAllocator(
             create_block=self._create_block,
@@ -53,6 +59,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         )
 
         self._block_size = block_size
+
+        self.evictor: Evictor = make_evictor(eviction_policy)
 
         # We share the refcounter between allocators. This allows us to promote
         # blocks originally allocated in the hashless allocator to immutable
@@ -116,7 +124,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block = self.allocate_mutable(prev_block)
         block.append_token_ids(token_ids)
         assert block.content_hash is not None
-        # TODO computed bit
 
         return block
 
@@ -133,17 +140,20 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert_prefix_caching_block_or_none(prev_block)
 
         try:
-            return self._hashless_allocator.allocate_mutable(
+            block = self._hashless_allocator.allocate_mutable(
                 prev_block=prev_block)
+            self._blocks[block.block_id] = block
+            return block
         except BlockAllocator.NoFreeBlocksError:
             # We must check the unused cached blocks before raising OOM.
             pass
 
         if self._unused_cached_blocks:
-            # TODO policy for selecting block to remove
-            content_hash_to_evict = next(iter(self._unused_cached_blocks))
+
+            content_hash_to_evict = self.evictor.evict()
 
             # Clear content hash mapping; the block will be overwritten.
+            del self._blocks[self._cached_blocks[content_hash_to_evict]]
             del self._cached_blocks[content_hash_to_evict]
 
             block_id = self._unused_cached_blocks.pop(content_hash_to_evict)
@@ -157,6 +167,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 block_id=block_id,
             )
             assert block.content_hash is None
+            block.computed = False
+            self._blocks[block_id] = block
             return block
 
         # No block available in hashless allocator, nor in unused cache blocks.
@@ -168,6 +180,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         if refcount == 1:
             assert content_hash in self._unused_cached_blocks
             del self._unused_cached_blocks[content_hash]
+            self.evictor.remove(content_hash)
 
     def free(self, block: Block) -> None:
         """Decrement the refcount of the block. If the decremented refcount is
@@ -180,6 +193,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 is not None), "freeing unallocated block is undefined"
 
         self._free_block_id_for_block(block.block_id, block)
+
         block.block_id = None
 
     def _free_block_id_for_block(self, block_id: BlockId,
@@ -193,9 +207,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # If no longer used, add the block to the unused cached blocks.
         if refcount == 0:
-            assert block.content_hash not in self._unused_cached_blocks
             assert block.content_hash in self._cached_blocks
             self._unused_cached_blocks[block.content_hash] = block_id
+            self.evictor.add(block.content_hash, block.num_hashed_tokens,
+                             block.last_accessed)
 
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
@@ -293,10 +308,21 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """
         return self._cow_tracker.clear_cows()
 
-    def mark_blocks_as_computed(self) -> None:
-        """Mark blocks as computed, used in prefix caching."""
-        # TODO Track computed blocks.
-        pass
+    def mark_blocks_as_computed(self, seq_block_ids: List[List[int]]) -> None:
+        """Mark immutable blocks as computed, used in prefix caching.
+
+        Only mark those immutable block as computed.
+        """
+        for block_ids in seq_block_ids:
+            block_cnt = 0
+            for block_id in block_ids:
+                block = self._blocks[block_id]
+                block_cnt += self._block_size - block.num_empty_slots
+                if block.computed:
+                    continue
+
+                block.computed = block.is_full
+                block.num_hashed_tokens = block_cnt * self._block_size
 
     def get_common_computed_block_ids(
             self, seq_block_ids: List[List[int]]) -> List[int]:
@@ -305,15 +331,14 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Used in prefill (can skip prefill of some blocks).
         """
 
-        # TODO: Track computed blocks.
-        computed = lambda block_id: False
-
         # NOTE We exclude the last block to avoid the case where the entire
         # prompt is cached. This would cause erroneous behavior in model
         # runner.
+
         ids_list = [
-            takewhile(lambda block_id: computed(block_id), seq[:-1])
-            for seq in seq_block_ids
+            list(
+                takewhile(lambda block_id: self._blocks[block_id].computed,
+                          seq[:-1])) for seq in seq_block_ids
         ]
         return commonprefix([ids for ids in ids_list if ids != []])
 
@@ -351,6 +376,9 @@ class PrefixCachingBlock(Block):
         self._prev_block = prev_block
         self._cached_content_hash: Optional[int] = None
         self._prefix_caching_allocator = prefix_caching_allocator
+        self.computed = False
+        self.num_hashed_tokens = 0
+        self.last_accessed = DEFAULT_LAST_ACCESSED_TIME
 
         self._block = NaiveBlock(
             prev_block=prev_block,
