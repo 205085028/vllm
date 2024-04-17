@@ -224,7 +224,7 @@ class LoRAModel:
         if os.path.isfile(lora_tensor_path):
             tensors = safetensors.torch.load_file(lora_tensor_path)
         elif os.path.isfile(lora_bin_file_path):
-            tensors = torch.load(lora_bin_file_path)
+            tensors = torch.load(lora_bin_file_path, device)
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
@@ -233,7 +233,7 @@ class LoRAModel:
             embeddings = safetensors.torch.load_file(
                 new_embeddings_tensor_path)
         elif os.path.isfile(new_embeddings_bin_file_path):
-            embeddings = torch.load(new_embeddings_bin_file_path)
+            embeddings = torch.load(new_embeddings_bin_file_path, device)
 
         rank = config["r"]
         lora_alpha = config["lora_alpha"]
