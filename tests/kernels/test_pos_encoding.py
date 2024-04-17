@@ -6,6 +6,7 @@ import torch
 from allclose_default import get_default_atol, get_default_rtol
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.utils import is_xpu
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -17,7 +18,9 @@ SEQ_LENS = [11, 8192]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+] if torch.cuda.is_available() else []
+SYCL_DEVICES = ["xpu:0"] if is_xpu() else []
+DEVICES = CUDA_DEVICES + SYCL_DEVICES
 
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
@@ -28,7 +31,7 @@ CUDA_DEVICES = [
 @pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_rotary_embedding(
     is_neox_style: bool,
@@ -72,8 +75,8 @@ def test_rotary_embedding(
                           rtol=get_default_rtol(out_query))
     assert torch.allclose(out_key,
                           ref_key,
-                          atol=get_default_atol(out_key),
-                          rtol=get_default_rtol(out_key))
+                          atol=get_default_atol(out_query),
+                          rtol=get_default_rtol(out_query))
 
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
@@ -84,7 +87,7 @@ def test_rotary_embedding(
 @pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_batched_rotary_embedding(
     is_neox_style: bool,
@@ -146,7 +149,7 @@ def test_batched_rotary_embedding(
 @pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_batched_rotary_embedding_multi_lora(
     is_neox_style: bool,

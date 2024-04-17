@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.utils import is_xpu
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
@@ -11,7 +12,9 @@ ADD_RESIDUAL = [False, True]
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+] if torch.cuda.is_available() else []
+SYCL_DEVICES = ["xpu:0"] if is_xpu() else []
+DEVICES = CUDA_DEVICES + SYCL_DEVICES
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -19,7 +22,7 @@ CUDA_DEVICES = [
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_rms_norm(
     num_tokens: int,
