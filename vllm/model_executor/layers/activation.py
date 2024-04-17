@@ -32,7 +32,7 @@ class SiluAndMul(nn.Module):
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        ops.silu_and_mul(out, x)
+        ops.silu_and_mul(out, x.contiguous())
         return out
 
 
@@ -61,6 +61,7 @@ class GeluAndMul(nn.Module):
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        x = x.contiguous()
         if self.approximate == "none":
             ops.gelu_and_mul(out, x)
         elif self.approximate == "tanh":
