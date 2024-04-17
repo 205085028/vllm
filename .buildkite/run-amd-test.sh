@@ -5,7 +5,17 @@ set -ex
 # Print ROCm version
 rocminfo
 
+#rocminfo | grep 'gfx*'
+
+#rocm-smi
+
+#env 
+
 # Try building the docker image
+#pip install huggingface_hub
+#~/.local/bin/huggingface-cli login --token $HF_TOKEN
+#~/.local/bin/huggingface-cli download meta-llama/Llama-2-7b-chat-hf
+
 docker build -t rocm -f Dockerfile.rocm .
 
 # Setup cleanup
