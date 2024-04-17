@@ -945,6 +945,43 @@ class ModelRunner:
         return self.lora_manager.list_loras()
 
     @torch.inference_mode()
+    def warmup_prefix_attn(self, kv_caches: List[torch.Tensor]) -> None:
+        """Prefix attention uses a triton jit.
+
+        In our profile_run() step, we profile with random data, so the case
+        with a cache hit is not executed. The triton JIT is generated on
+        the fly, so the first call to context_attention_fwd will take
+        ~3s to process. Without this warmup, this JIT will occur on the hot
+        path.
+
+        In this case, we make a sequence with metadata that triggers 
+        the triton JIT.
+        """
+
+        NUM_ITERATIONS = 5 # empirically requires 5 passes.
+        NUM_BLOCKS = [2, 4, 8, 16, 32]
+        for num_blocks in NUM_BLOCKS:
+            num_computed_blocks = num_blocks - 2
+            prompt_tokens = list(range(self.block_size * num_blocks + 1))
+            block_table = list(range(1, num_blocks + 2))
+
+            # Prompt forward with block 1 computed. (Triggers
+            # context_attention_fwd).
+            request = SequenceGroupMetadata(
+                request_id="request",
+                is_prompt=True,
+                seq_data={0: SequenceData(prompt_tokens)},
+                sampling_params=SamplingParams(temperature=0),
+                block_tables={0: block_table},
+                computed_block_nums=block_table[:num_computed_blocks],
+            )
+
+            for _ in range(NUM_ITERATIONS):
+                self.execute_model([request], kv_caches)
+
+        return
+
+    @torch.inference_mode()
     def capture_model(self, kv_caches: List[torch.Tensor]) -> None:
         """Cuda graph capture a model.
 
