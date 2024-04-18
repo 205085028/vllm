@@ -32,7 +32,7 @@ def request_output_to_embedding_response(
         assert final_res is not None
         prompt_token_ids = final_res.prompt_token_ids
 
-        embedding_data = EmeddingResponseData(
+        embedding_data = EmbeddingResponseData(
             index=idx, embedding=final_res.outputs.embedding)
         data.append(embedding_data)
 
@@ -84,10 +84,12 @@ def merge_async_iterators(*iterators):
 
 class OpenAIServingEmbedding(OpenAIServing):
 
-    def __init__(self, engine: AsyncLLMEngine, served_model: str):
+    def __init__(self, engine: AsyncLLMEngine, served_model: str,
+                 embedding_mode: bool):
         super().__init__(engine=engine,
                          served_model=served_model,
                          lora_modules=None)
+        self._check_embedding_mode(embedding_mode)
 
     async def create_embedding(self, request: EmbeddingRequest,
                                raw_request: Request):
@@ -150,3 +152,10 @@ class OpenAIServingEmbedding(OpenAIServing):
             final_res_batch, request_id, created_time, model_name)
 
         return response
+
+    def _check_embedding_mode(self, embedding_mode: bool):
+        if not embedding_mode:
+            logger.warning(
+                "embedding_mode is False. Embedding API will not work.")
+        else:
+            logger.info("Activating the server engine with embedding enabled.")
