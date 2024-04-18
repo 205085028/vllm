@@ -144,6 +144,7 @@ class RejectionSampler(nn.Module):
         recovered_probs = self._get_recovered_probs(
             target_probs, draft_probs).reshape(batch_size * k, vocab_size)
 
+        # NOTE: the recovered_probs are overwritten by this method.
         recovered_token_ids = _multinomial(recovered_probs,
                                            num_samples=1).reshape(
                                                batch_size, k)
@@ -311,9 +312,25 @@ class RejectionSampler(nn.Module):
         output.mul_(~after_false_mask).add_(
             recovered_token_ids.mul(after_false_mask))
 
-        self.num_accepted_tokens += accepted.sum()
-        self.num_emitted_tokens += (output_with_bonus_tokens != -1).sum()
-        self.num_draft_tokens += batch_size * k
+        da = accepted.sum()
+        de = (output_with_bonus_tokens != -1).sum()
+        dd = batch_size * k
+
+        self.num_accepted_tokens += da
+        self.num_emitted_tokens += de
+        self.num_draft_tokens += dd
+
+        #self.num_accepted_tokens += accepted.sum()
+        #self.num_emitted_tokens += (output_with_bonus_tokens != -1).sum()
+        #self.num_draft_tokens += batch_size * k
+
+        print(f'delta num_accepted={da}')
+        print(f'delta num_emitted_tokens={de}')
+        print(f'delta num_draft_tokens={dd}')
+
+        print(f'cumulative {self.num_accepted_tokens=}')
+        print(f'cumulative {self.num_emitted_tokens=}')
+        print(f'cumulative {self.num_draft_tokens=}')
 
         return output_with_bonus_tokens
 
@@ -330,16 +347,20 @@ class RejectionSampler(nn.Module):
         draft_batch_size, num_draft_probs, draft_vocab_size = draft_probs.shape
         draft_token_ids_batch_size, num_draft_token_ids = draft_token_ids.shape
 
-        assert draft_batch_size == target_batch_size
-        assert num_draft_probs == num_target_probs
-        assert (draft_vocab_size == target_vocab_size
-                ), f"{draft_vocab_size=} {target_vocab_size=}"
+        try:
+            assert draft_batch_size == target_batch_size
+            assert num_draft_probs == num_target_probs
+            assert (draft_vocab_size == target_vocab_size
+                    ), f"{draft_vocab_size=} {target_vocab_size=}"
 
-        assert draft_token_ids_batch_size == draft_batch_size
-        assert num_draft_token_ids == num_draft_probs
+            assert draft_token_ids_batch_size == draft_batch_size
+            assert num_draft_token_ids == num_draft_probs
 
-        assert bonus_batch_size == target_batch_size
-        assert num_bonus_tokens == self._num_bonus_tokens
+            assert bonus_batch_size == target_batch_size
+            assert num_bonus_tokens == self._num_bonus_tokens
+        except:
+            #breakpoint()
+            raise
 
     def _raise_if_incorrect_dtype(
         self,

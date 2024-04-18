@@ -6,8 +6,7 @@ import torch
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
-from vllm.spec_decode.util import (maybe_mock_device_tensors,
-                                   sampler_output_to_torch)
+from vllm.spec_decode.util import sampler_output_to_torch
 from vllm.worker.worker import Worker
 
 
@@ -257,6 +256,11 @@ class DraftModelTop1Proposer(SpeculativeProposer):
          nonzero_proposal_len_indices) = self._split_by_max_model_len(
              seq_group_metadata_list, max_proposal_len)
 
+        print(f'{proposal_lens=}')
+        if 0 in proposal_lens:
+            pass
+            #breakpoint()
+
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
             # sequences.
@@ -270,6 +274,10 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         else:
             # If no sequences can be speculated, set sampler output to None.
             maybe_sampler_output = None
+
+        if 0 in proposal_lens:
+            pass
+            #breakpoint()
 
         # Combine speculative- and non-speculative sequences into the same
         # representation.
@@ -330,11 +338,23 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         if maybe_sampler_output is None:
             # If no speculative tokens, the sampler output will be None.
             # In this case we return empty tensors.
-            proposal_tokens = torch.zeros(0,
-                                          max_proposal_len,
-                                          dtype=torch.long,
-                                          device=self._device)
-            proposal_probs = torch.zeros(0,
+            #proposal_tokens = torch.zeros(0,
+            #                              max_proposal_len,
+            #                              dtype=torch.long,
+            #                              device=self._device)
+            proposal_tokens = torch.full(size=(
+                batch_size,
+                max_proposal_len,
+            ),
+                                         fill_value=-1,
+                                         dtype=torch.long,
+                                         device=self._device)
+            #proposal_probs = torch.zeros(0,
+            #                             max_proposal_len,
+            #                             self._vocab_size,
+            #                             dtype=torch.float32,
+            #                             device=self._device)
+            proposal_probs = torch.zeros(batch_size,
                                          max_proposal_len,
                                          self._vocab_size,
                                          dtype=torch.float32,
@@ -349,12 +369,13 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         # We mock the device tensors until PR 7/9 is merged (e2e correctness).
         # https://docs.google.com/document/d/1rE4pr3IdspRw97XbImY4fS9IWYuJJ3HGtL7AdIKGrw8/edit#heading=h.qijw1sdidrer
         for step_output in sampler_output:
-            maybe_mock_device_tensors(
-                sampler_output=step_output,
-                batch_size=len(proposal_lens),
-                vocab_size=self._vocab_size,
-                device=self._device,
-            )
+            pass
+            #maybe_mock_device_tensors(
+            #    sampler_output=step_output,
+            #    batch_size=len(proposal_lens),
+            #    vocab_size=self._vocab_size,
+            #    device=self._device,
+            #)
 
         proposal_tokens, proposal_probs = sampler_output_to_torch(
             sampler_output)

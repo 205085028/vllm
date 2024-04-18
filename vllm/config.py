@@ -650,6 +650,7 @@ class SpeculativeConfig:
         target_dtype: str,
         speculative_model: Optional[str],
         num_speculative_tokens: Optional[int],
+        speculative_max_model_len: Optional[int],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -667,6 +668,7 @@ class SpeculativeConfig:
                 model, if provided.
             num_speculative_tokens (Optional[int]): The number of speculative
                 tokens, if provided.
+            TODO speculative_max_model_len
 
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
@@ -690,7 +692,6 @@ class SpeculativeConfig:
         draft_revision = None
         draft_code_revision = None
         draft_quantization = None
-        draft_max_model_len = None
 
         draft_model_config = ModelConfig(
             model=speculative_model,
@@ -702,13 +703,27 @@ class SpeculativeConfig:
             revision=draft_revision,
             code_revision=draft_code_revision,
             tokenizer_revision=target_model_config.tokenizer_revision,
-            max_model_len=draft_max_model_len,
+            max_model_len=None,
             quantization=draft_quantization,
             enforce_eager=target_model_config.enforce_eager,
             max_context_len_to_capture=target_model_config.
             max_context_len_to_capture,
             max_logprobs=target_model_config.max_logprobs,
         )
+
+        # TODO docs
+        #draft_model_config.max_model_len = min(
+        #    target_model_config.max_model_len,
+        #    draft_model_config.max_model_len)
+
+        max_model_lens = [
+            speculative_max_model_len, draft_model_config.max_model_len,
+            target_model_config.max_model_len
+        ]
+        draft_model_config.max_model_len = min([
+            max_model_len for max_model_len in max_model_lens
+            if max_model_len is not None
+        ])
 
         draft_parallel_config = (
             SpeculativeConfig.create_draft_parallel_config(
