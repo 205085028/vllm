@@ -47,6 +47,10 @@ Alongside each architecture, we include some popular models that use it.
     - Falcon
     - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
     -
+  * - :code:`FuyuForCausalLM`
+    - Fuyu
+    - :code:`adept/fuyu-8b` etc.
+    - 
   * - :code:`GemmaForCausalLM`
     - Gemma
     - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
@@ -115,6 +119,10 @@ Alongside each architecture, we include some popular models that use it.
     - Phi
     - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
     -
+  * - :code:`PersimmonForCausalLM`
+    - Persimmon
+    - :code:`adept/persimmon-8b-base`, :code:`adept/persimmon-8b-chat`, etc.
+    - 
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
