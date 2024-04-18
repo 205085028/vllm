@@ -37,6 +37,8 @@ class CPUModelRunner:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        # Currently, CPU worker doesn't support chunked prefill.
+        assert self.scheduler_config.chunked_prefill_enabled is False
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
@@ -254,11 +256,13 @@ class CPUModelRunner:
                                          }
         categorized_sample_indices_start_idx = 0
         categorized_sampled_token_indices_start_idx = 0
+        do_samples: List[bool] = []
 
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
             seq_groups.append((seq_ids, sampling_params))
+            do_samples.append(seq_group_metadata.do_sample)
 
             if seq_group_metadata.is_prompt:
                 assert len(seq_ids) == 1
@@ -327,7 +331,11 @@ class CPUModelRunner:
             prompt_lens=prompt_lens,
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
+            do_samples=do_samples,
             generators=generators,
+            # Since CPU worker doesn't support chunked prefill subquery_lens is
+            # always equivalent to prompt_lens.
+            subquery_lens=prompt_lens,
         )
         return sampling_metadata
 
@@ -372,6 +380,7 @@ class CPUModelRunner:
                 prompt_lens=None,
                 selected_token_indices=selected_token_indices,
                 categorized_sample_indices=None,
+                do_samples=[],
                 generators=None,
                 perform_sampling=False,
             )

@@ -54,16 +54,24 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 ), f"{type(self)} does not support multiple outputs per step"
         return self._process_sequence_group_outputs(sequence_group, outputs[0])
 
-    def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
-                                        outputs: SequenceGroupOutput) -> None:
-
-        # Process prompt logprobs
-        prompt_logprobs = outputs.prompt_logprobs
+    def process_prompt_logprob(self, seq_group: SequenceGroup,
+                               outputs: List[SequenceGroupOutput]) -> None:
+        # Single step worker only has 1 SequenceGroupOutput. But it can contain
+        # multiple samples if beam search is used.
+        assert len(outputs) == 1
+        output = outputs[0]
+        prompt_logprobs = output.prompt_logprobs
         if prompt_logprobs is not None and seq_group.sampling_params.detokenize:
             self.detokenizer.decode_prompt_logprobs_inplace(
                 seq_group, prompt_logprobs)
-            seq_group.prompt_logprobs = prompt_logprobs
+            if not seq_group.prompt_logprobs:
+                # The first prompt token's logprob is None because it doesn't
+                # have tokens that are precedent.
+                seq_group.prompt_logprobs = [None]
+            seq_group.prompt_logprobs.extend(prompt_logprobs)
 
+    def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
+                                        outputs: SequenceGroupOutput) -> None:
         # Process samples
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)

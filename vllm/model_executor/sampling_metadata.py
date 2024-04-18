@@ -22,10 +22,15 @@ class SamplingMetadata:
         prompt_lens: Lengths of prompts.
         selected_token_indices: Token indices selected for sampling.
         categorized_sample_indices: SamplingType -> token indices to sample.
+        do_samples: Whether or not it should sample per seq_group. Each index
+            means each seq_group.
         generators: List of torch.Generators to use for seeded sampling
         perform_sampling: Whether to perform sampling. This option is used to
             make the sampling only happens in the driver worker, and disable
             sampling in other worker processes.
+        subquery_lens: Length of query tokens. It only exists for seq groups
+            in a prefill stage (same length as prompt_lens). It could be
+            shorter than prompt_lens when prefill is chunked.
     """
 
     def __init__(
@@ -35,16 +40,20 @@ class SamplingMetadata:
         prompt_lens: Optional[List[int]],
         selected_token_indices: torch.Tensor,
         categorized_sample_indices: Optional[Dict[SamplingType, torch.Tensor]],
+        do_samples: List[bool],
         generators: Optional[List[torch.Generator]] = None,
         perform_sampling: bool = True,
+        subquery_lens: Optional[List[int]] = None,
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
         self.prompt_lens = prompt_lens
         self.selected_token_indices = selected_token_indices
         self.categorized_sample_indices = categorized_sample_indices
+        self.do_samples = do_samples
         self.generators = generators
         self.perform_sampling = perform_sampling
+        self.subquery_lens = subquery_lens
 
         self.num_prompts = len(prompt_lens) if prompt_lens is not None else 0
 
@@ -149,8 +158,8 @@ class SamplingTensors:
                     and sampling_params.prompt_logprobs is not None):
                 # For tokens in the prompt that we only need to get
                 # their logprobs
-                assert sampling_metadata.prompt_lens is not None
-                prompt_len = sampling_metadata.prompt_lens[i]
+                assert sampling_metadata.subquery_lens is not None
+                prompt_len = sampling_metadata.subquery_lens[i]
                 temperatures += [temperature] * (prompt_len - 1)
                 top_ps += [top_p] * (prompt_len - 1)
                 top_ks += [top_k] * (prompt_len - 1)
@@ -175,8 +184,8 @@ class SamplingTensors:
             is_prompt = i < sampling_metadata.num_prompts
             if is_prompt:
                 prompt_best_of.append(sampling_params.best_of)
-                assert sampling_metadata.prompt_lens is not None
-                prompt_len = sampling_metadata.prompt_lens[i]
+                assert sampling_metadata.subquery_lens is not None
+                prompt_len = sampling_metadata.subquery_lens[i]
 
                 if sampling_params.prompt_logprobs is not None:
                     # NOTE: the sampling position is the last token
