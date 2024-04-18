@@ -22,6 +22,8 @@ steps:
     command: bash .buildkite/run-amd-test.sh
 
   - label: "CPU Test"
+    agents:
+      queue: intel
     command: bash .buildkite/run-cpu-test.sh
 
   {% for step in steps %}

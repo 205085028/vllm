@@ -14,6 +14,7 @@ from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
 from vllm.sequence import MultiModalData
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.utils import is_cpu
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
@@ -51,7 +52,8 @@ def cleanup():
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
     gc.collect()
-    torch.cuda.empty_cache()
+    if not is_cpu():
+        torch.cuda.empty_cache()
 
 
 @pytest.fixture()
@@ -136,6 +138,12 @@ _VISION_LANGUAGE_MODELS = {
 
 class HfRunner:
 
+    def wrap_device(self, input: any):
+        if is_cpu():
+            return input.cpu()
+        else:
+            return input.cuda()
+
     def __init__(
         self,
         model_name: str,
@@ -146,18 +154,20 @@ class HfRunner:
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
         self.model_name = model_name
         if model_name not in _VISION_LANGUAGE_MODELS:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            ).cuda()
+            self.model = self.wrap_device(
+                AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=True,
+                ))
             self.processor = None
         else:
-            self.model = _VISION_LANGUAGE_MODELS[model_name].from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            ).cuda()
+            self.model = self.wrap_device(
+                _VISION_LANGUAGE_MODELS[model_name].from_pretrained(
+                    model_name,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=True,
+                ))
             self.processor = AutoProcessor.from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
@@ -179,14 +189,14 @@ class HfRunner:
             if self.model_name not in _VISION_LANGUAGE_MODELS:
                 input_ids = self.tokenizer(prompt,
                                            return_tensors="pt").input_ids
-                inputs = {"input_ids": input_ids.cuda()}
+                inputs = {"input_ids": self.wrap_device(input_ids)}
             else:
                 image = images[i] if images else None
                 inputs = self.processor(text=prompt,
                                         images=image,
                                         return_tensors="pt")
                 inputs = {
-                    key: value.cuda() if value is not None else None
+                    key: self.wrap_device(value) if value is not None else None
                     for key, value in inputs.items()
                 }
             output_ids = self.model.generate(
@@ -248,7 +258,7 @@ class HfRunner:
         for prompt in prompts:
             input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
             output = self.model.generate(
-                input_ids.cuda(),
+                self.wrap_device(input_ids),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
