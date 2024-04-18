@@ -389,7 +389,7 @@ class CompletionStreamResponse(BaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
-class EmeddingResponseData(BaseModel):
+class EmbeddingResponseData(BaseModel):
     index: int
     object: str = "embedding"
     embedding: List[float]
@@ -400,7 +400,7 @@ class EmbeddingResponse(BaseModel):
     object: str = "list"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
-    data: List[EmeddingResponseData]
+    data: List[EmbeddingResponseData]
     usage: UsageInfo
 
 

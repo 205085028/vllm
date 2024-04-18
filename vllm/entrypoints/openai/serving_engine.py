@@ -192,14 +192,13 @@ class OpenAIServing:
         token_num = len(input_ids)
 
         # Note: EmbeddingRequest doesn't have max_tokens
-        if (isinstance(request, EmbeddingRequest)
-                and token_num > self.max_model_len):
-            raise ValueError(
-                f"This model's maximum context length is "
-                f"{self.max_model_len} tokens. However, you requested "
-                f"{token_num} tokens in the messages, "
-                f"Please reduce the length of the messages.", )
-        elif isinstance(request, EmbeddingRequest):
+        if isinstance(request, EmbeddingRequest):
+            if token_num > self.max_model_len:
+                raise ValueError(
+                    f"This model's maximum context length is "
+                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{token_num} tokens in the input for embedding "
+                    f"generation. Please reduce the length of the input.", )
             return input_ids
 
         if request.max_tokens is None:

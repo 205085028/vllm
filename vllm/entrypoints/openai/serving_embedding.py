@@ -7,7 +7,7 @@ from fastapi import Request
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (EmbeddingRequest,
                                               EmbeddingResponse,
-                                              EmeddingResponseData, UsageInfo)
+                                              EmbeddingResponseData, UsageInfo)
 from vllm.entrypoints.openai.serving_completion import parse_prompt_format
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.logger import init_logger
