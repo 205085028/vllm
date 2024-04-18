@@ -45,7 +45,7 @@ def fused_moe_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
+    SPLIT_K_SIZE: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
@@ -81,13 +81,9 @@ def fused_moe_kernel(
     # This is done in a grouped ordering to promote L2 data reuse.
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
+    pid_m = (pid % num_pid_m)
+    pid_n = pid // num_pid_m
+    pid_k = tl.program_id(axis=1)
 
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
@@ -103,7 +99,7 @@ def fused_moe_kernel(
     token_mask = offs_token < num_valid_tokens
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    offs_k = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + (offs_token[:, None] // top_k * stride_am +
                       offs_k[None, :] * stride_ak)
 
@@ -118,21 +114,21 @@ def fused_moe_kernel(
     # `accumulator` will be converted back to fp16 after the loop.
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K_SIZE)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
         a = tl.load(a_ptrs,
                     mask=token_mask[:, None] &
-                    (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+                    (offs_k[None, :] < K - k * BLOCK_SIZE_K * SPLIT_K_SIZE),
                     other=0.0)
         b = tl.load(b_ptrs,
-                    mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
+                    mask=offs_k[:, None] < K - k * BLOCK_SIZE_K * SPLIT_K_SIZE,
                     other=0.0)
         # We accumulate along the K dimension.
-        accumulator += tl.dot(a, b)
+        accumulator = tl.dot(a, b, acc=accumulator, allow_tf32=True)
         # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+        a_ptrs += BLOCK_SIZE_K * SPLIT_K_SIZE * stride_ak
+        b_ptrs += BLOCK_SIZE_K * SPLIT_K_SIZE * stride_bk
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token,
@@ -147,7 +143,11 @@ def fused_moe_kernel(
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[
         None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, accumulator, mask=c_mask)
+
+    if SPLIT_K_SIZE == 1:
+        tl.store(c_ptrs, accumulator, mask=c_mask)
+    else:
+        tl.atomic_add(c_ptrs, accumulator, mask=c_mask)
 
 
 def moe_align_block_size(
@@ -216,8 +216,14 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
-    grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
-        'BLOCK_SIZE_M']) * triton.cdiv(B.shape[1], META['BLOCK_SIZE_N']), )
+    grid = lambda META: (
+        triton.cdiv(sorted_token_ids.shape[0], META['BLOCK_SIZE_M']) * triton.cdiv(B.shape[1], META['BLOCK_SIZE_N']),
+        META['SPLIT_K_SIZE']
+    )
+
+    if config['SPLIT_K_SIZE'] > 1:
+        # If we are using split k, we need to zero the result to prepare for atomic_add
+        C.zero_()
 
     fused_moe_kernel[grid](
         A,
@@ -240,7 +246,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         C.stride(2),
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
-        compute_type=tl.bfloat16 if A.dtype == torch.bfloat16 else tl.float16,
+        compute_type=tl.float16,
         **config,
     )
 
@@ -283,6 +289,8 @@ def fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    s: torch.Tensor,
+    s2: torch.Tensor,
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
@@ -370,7 +378,6 @@ def fused_moe(
                 'BLOCK_SIZE_M': 64,
                 'BLOCK_SIZE_N': 64,
                 'BLOCK_SIZE_K': 32,
-                'GROUP_SIZE_M': 8
             }
 
             if M <= E:
@@ -378,7 +385,6 @@ def fused_moe(
                     'BLOCK_SIZE_M': 16,
                     'BLOCK_SIZE_N': 32,
                     'BLOCK_SIZE_K': 64,
-                    'GROUP_SIZE_M': 1
                 }
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
@@ -394,14 +400,20 @@ def fused_moe(
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
 
-    invoke_fused_moe_kernel(hidden_states, w1, intermediate_cache1,
+    hidden_states_scaled = hidden_states / s
+
+    invoke_fused_moe_kernel(hidden_states_scaled.to(dtype=torch.float8_e4m3fn),
+                            w1, intermediate_cache1,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, False,
                             topk_ids.shape[1], config)
 
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
-    invoke_fused_moe_kernel(intermediate_cache2, w2, intermediate_cache3,
+    intermediate_cache2_scaled = intermediate_cache2 / s2
+
+    invoke_fused_moe_kernel(intermediate_cache2_scaled.to(dtype=torch.float8_e4m3fn),
+                            w2, intermediate_cache3,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, True, 1,
                             config)
