@@ -1,67 +1,87 @@
-# Adapted from
-# https://github.com/skypilot-org/skypilot/blob/86dc0f6283a335e4aa37b3c10716f90999f48ab6/sky/sky_logging.py
 """Logging configuration for vLLM."""
+import json
 import logging
 import os
-import sys
-from typing import Optional
+from logging import Logger
+from logging.config import dictConfig
+from os import path
+from typing import Dict
 
 VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
+VLLM_LOGGING_CONFIG_PATH = os.getenv("VLLM_LOGGING_CONFIG_PATH")
 
 _FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
+DEFAULT_LOGGING_CONFIG = {
+    "formatters": {
+        "vllm": {
+            "class": "vllm.logging.NewLineFormatter",
+            "datefmt": _DATE_FORMAT,
+            "format": _FORMAT,
+        },
+    },
+    "handlers": {
+        "vllm": {
+            "class": "logging.StreamHandler",
+            "formatter": "vllm",
+            "level": "INFO",
+            "stream": "ext://sys.stdout",
+        },
+    },
+    "loggers": {
+        "vllm": {
+            "handlers": ["vllm"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+    },
+    "version": 1,
+}
 
-class NewLineFormatter(logging.Formatter):
-    """Adds logging prefix to newlines to align multi-line messages."""
 
-    def __init__(self, fmt, datefmt=None):
-        logging.Formatter.__init__(self, fmt, datefmt)
+def _configure_vllm_root_logger() -> None:
+    if VLLM_CONFIGURE_LOGGING:
+        logging_config: Dict = DEFAULT_LOGGING_CONFIG
 
-    def format(self, record):
-        msg = logging.Formatter.format(self, record)
-        if record.message != "":
-            parts = msg.split(record.message)
-            msg = msg.replace("\n", "\r\n" + parts[0])
-        return msg
+    if VLLM_LOGGING_CONFIG_PATH:
+        if not path.exists(VLLM_LOGGING_CONFIG_PATH):
+            raise RuntimeError(
+                "Could not load logging config. File does not exist:"
+                f" {VLLM_LOGGING_CONFIG_PATH}")
+        with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8",
+                  mode="r") as file:
+            custom_config = json.loads(file.read())
+
+        if not isinstance(custom_config, dict):
+            raise ValueError("Invalid logging config. Expected Dict, got"
+                             f" {type(custom_config).__name__}.")
+        logging_config = custom_config
+
+    if logging_config:
+        dictConfig(logging_config)
 
 
-_root_logger = logging.getLogger("vllm")
-_default_handler: Optional[logging.Handler] = None
+def _configure_vllm_logger(logger: Logger) -> None:
+    # Use the same settings as for root logger
+    _root_logger = logging.getLogger("vllm")
+    default_log_level = os.getenv("LOG_LEVEL", _root_logger.level)
+    logger.setLevel(default_log_level)
+    for handler in _root_logger.handlers:
+        logger.addHandler(handler)
+    logger.propagate = False
 
 
-def _setup_logger():
-    _root_logger.setLevel(logging.DEBUG)
-    global _default_handler
-    if _default_handler is None:
-        _default_handler = logging.StreamHandler(sys.stdout)
-        _default_handler.flush = sys.stdout.flush  # type: ignore
-        _default_handler.setLevel(logging.INFO)
-        _root_logger.addHandler(_default_handler)
-    fmt = NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT)
-    _default_handler.setFormatter(fmt)
-    # Setting this will avoid the message
-    # being propagated to the parent logger.
-    _root_logger.propagate = False
+def init_logger(name: str) -> Logger:
+    logger_is_new = name not in logging.Logger.manager.loggerDict
+    logger = logging.getLogger(name)
+    if VLLM_CONFIGURE_LOGGING and logger_is_new:
+        _configure_vllm_logger(logger)
+    return logger
 
 
 # The logger is initialized when the module is imported.
 # This is thread-safe as the module is only imported once,
 # guaranteed by the Python GIL.
-if VLLM_CONFIGURE_LOGGING:
-    _setup_logger()
-
-
-def init_logger(name: str):
-    # Use the same settings as above for root logger
-    logger = logging.getLogger(name)
-    logger.setLevel(os.getenv("LOG_LEVEL", "DEBUG"))
-
-    if VLLM_CONFIGURE_LOGGING:
-        if _default_handler is None:
-            raise ValueError(
-                "_default_handler is not set up. This should never happen!"
-                " Please open an issue on Github.")
-        logger.addHandler(_default_handler)
-        logger.propagate = False
-    return logger
+if VLLM_CONFIGURE_LOGGING or VLLM_LOGGING_CONFIG_PATH:
+    _configure_vllm_root_logger()
