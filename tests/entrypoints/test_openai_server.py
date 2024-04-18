@@ -82,7 +82,7 @@ class ServerRunner:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         self.proc = subprocess.Popen(
-            ["python3", "-m", "vllm.entrypoints.openai.api_server"] + args,
+            ["vllm", "serve"] + args,
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
@@ -123,7 +123,6 @@ def zephyr_lora_files():
 def server(zephyr_lora_files):
     ray.init()
     server_runner = ServerRunner.remote([
-        "--model",
         MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
