@@ -1,15 +1,78 @@
 """Token blocks."""
 from itertools import takewhile
 from os.path import commonprefix
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, OrderedDict, Tuple
 
 from vllm.core.block.common import (CopyOnWriteTracker,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
+from vllm.core.block import DEFAULT_LAST_ACCESSED_TIME
 
 PrefixHash = int
 BlockId = int
+
+
+class BlockMetaData:
+
+    def __init__(
+        self,
+        computed: bool = False,
+        last_accessed: float = DEFAULT_LAST_ACCESSED_TIME,
+        token_ids_len: int = 0,
+    ):
+        self.computed: bool = computed
+        self.last_accessed: float = last_accessed
+        self.token_ids_len: int = token_ids_len
+
+
+class LRUEvictorV2:
+
+    def __init__(self):
+        self._free_blocks: OrderedDict[PrefixHash, BlockId] = OrderedDict()
+
+    def __contains__(self, block_hash: PrefixHash) -> bool:
+        return block_hash in self._free_blocks
+
+    def evict(
+        self, block_meta_data: Dict[BlockId, BlockMetaData]
+    ) -> Tuple[BlockId, PrefixHash]:
+        evicted_block_hash, evicted_block_id = next(
+            iter(self._free_blocks.items()))
+
+        # Find the block with the "lowest" timestamp
+        for block_hash, block_id in self._free_blocks.items():
+            evicted_block_id = self._free_blocks[evicted_block_hash]
+            evicted_block_last_accessed = block_meta_data[
+                evicted_block_id].last_accessed
+            block_last_accessed = block_meta_data[block_id].last_accessed
+
+            if evicted_block_last_accessed < block_last_accessed:
+                break
+
+            # If two blocks have the same last_accessed_time, evict the one
+            # with more token_ids
+            if block_meta_data[block_id].token_ids_len > block_meta_data[
+                    evicted_block_id].token_ids_len:
+                evicted_block_hash = block_hash
+                evicted_block_id = block_id
+            assert block_last_accessed == evicted_block_last_accessed
+
+        del self._free_blocks[evicted_block_hash]
+        return evicted_block_id, evicted_block_hash
+
+    def add(self, block_hash: PrefixHash, block_id: BlockId):
+        self._free_blocks[block_hash] = block_id
+
+    def remove(self, block_hash: PrefixHash):
+        if block_hash not in self._free_blocks:
+            raise ValueError(
+                "Attempting to remove block that's not in the evictor")
+        del self._free_blocks[block_hash]
+
+    @property
+    def num_blocks(self) -> int:
+        return len(self._free_blocks)
 
 
 class PrefixCachingBlockAllocator(BlockAllocator):
@@ -37,12 +100,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     ):
         # A mapping of prefix hash to block index. All blocks which have a
         # prefix hash will be in this dict, even if they have refcount 0.
-        self._cached_blocks: Dict[PrefixHash, BlockId] = {}
+        self._cached_blocks: OrderedDict[PrefixHash, BlockId] = OrderedDict()
 
-        # A mapping of prefix hash to block index. All blocks which have a
-        # prefix hash AND refcount 0 will be in this dict. Thus, it is a subset
-        # of self._cached_blocks.
-        self._unused_cached_blocks: Dict[PrefixHash, BlockId] = {}
+        # A mapping of block index to block metadata. All blocks that are in
+        # _cached_blocks will be in this dict.
+        self._block_meta_data: Dict[BlockId, BlockMetaData] = {}
 
         # An allocator for blocks that do not have prefix hashes.
         self._hashless_allocator = NaiveBlockAllocator(
@@ -53,6 +115,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         )
 
         self._block_size = block_size
+        self._evictor = LRUEvictorV2()
 
         # We share the refcounter between allocators. This allows us to promote
         # blocks originally allocated in the hashless allocator to immutable
@@ -116,7 +179,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block = self.allocate_mutable(prev_block)
         block.append_token_ids(token_ids)
         assert block.content_hash is not None
-        # TODO computed bit
 
         return block
 
@@ -139,14 +201,14 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # We must check the unused cached blocks before raising OOM.
             pass
 
-        if self._unused_cached_blocks:
-            # TODO policy for selecting block to remove
-            content_hash_to_evict = next(iter(self._unused_cached_blocks))
+        if self._evictor.num_blocks > 0:
+            block_id, content_hash_to_evict = self._evictor.evict(
+                self._block_meta_data)
 
             # Clear content hash mapping; the block will be overwritten.
             del self._cached_blocks[content_hash_to_evict]
+            del self._block_meta_data[block_id]
 
-            block_id = self._unused_cached_blocks.pop(content_hash_to_evict)
             refcount = self._refcounter.incr(block_id)
             assert refcount == 1
             block = self._create_block(
@@ -166,8 +228,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                     block_id: BlockId) -> None:
         refcount = self._refcounter.incr(block_id)
         if refcount == 1:
-            assert content_hash in self._unused_cached_blocks
-            del self._unused_cached_blocks[content_hash]
+            assert content_hash in self._evictor
+            self._evictor.remove(content_hash)
 
     def free(self, block: Block) -> None:
         """Decrement the refcount of the block. If the decremented refcount is
@@ -193,9 +255,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # If no longer used, add the block to the unused cached blocks.
         if refcount == 0:
-            assert block.content_hash not in self._unused_cached_blocks
+            assert block.content_hash not in self._evictor
             assert block.content_hash in self._cached_blocks
-            self._unused_cached_blocks[block.content_hash] = block_id
+            self._evictor.add(block.content_hash, block.block_id)
+            self._block_meta_data[
+                block_id].token_ids_len = block.num_tokens_total
 
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
@@ -230,9 +294,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def get_num_free_blocks(self) -> int:
         # The number of free blocks is the number of hashless free blocks
-        # plus the number of hashful blocks that are unused.
-        return self._hashless_allocator.get_num_free_blocks() + len(
-            self._unused_cached_blocks)
+        # plus the number of hashful blocks that are in the evictor.
+        return self._hashless_allocator.get_num_free_blocks(
+        ) + self._evictor.num_blocks
 
     @property
     def all_block_ids(self) -> frozenset[int]:
@@ -263,8 +327,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # set this block as the cached block.
         if block.content_hash not in self._cached_blocks:
             self._cached_blocks[block.content_hash] = block.block_id
+            self._block_meta_data[block.block_id] = BlockMetaData(
+                token_ids_len=block.num_tokens_total)
         else:
-            self._free_block_id_for_block(block.block_id, block)
+            # Otherwise, increment the ref count of the cached block
             self._incr_refcount_cached_block(
                 block.content_hash, self._cached_blocks[block.content_hash])
 
@@ -295,8 +361,22 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def mark_blocks_as_computed(self) -> None:
         """Mark blocks as computed, used in prefix caching."""
-        # TODO Track computed blocks.
-        pass
+        # Reverse iterate over the blocks in _cached_blocks and break the
+        # first time we find a computed block.
+        for _, block_id in reversed(self._cached_blocks.items()):
+            if self._block_meta_data[block_id].computed:
+                break
+            self._block_meta_data[block_id].computed = True
+
+    def get_all_computed_blocks(self, seq: List[int]) -> List[int]:
+
+        def computed(block_id):
+            return self._block_meta_data[block_id].computed
+
+        return [
+            block_id for block_id in takewhile(
+                lambda block_id: computed(block_id), seq[:-1])
+        ]
 
     def get_common_computed_block_ids(
             self, seq_block_ids: List[List[int]]) -> List[int]:
@@ -305,17 +385,20 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Used in prefill (can skip prefill of some blocks).
         """
 
-        # TODO: Track computed blocks.
-        computed = lambda block_id: False
-
         # NOTE We exclude the last block to avoid the case where the entire
         # prompt is cached. This would cause erroneous behavior in model
         # runner.
-        ids_list = [
-            takewhile(lambda block_id: computed(block_id), seq[:-1])
-            for seq in seq_block_ids
-        ]
+        ids_list = [self.get_all_computed_blocks(seq) for seq in seq_block_ids]
         return commonprefix([ids for ids in ids_list if ids != []])
+
+    def access_all_blocks_in_seq(self, seq_block_ids: List[int], now: float):
+        for block_id in seq_block_ids:
+            # If there's a mutable block at the end of the sequence it won't
+            # be in _block_meta_data yet since it's not cached.
+            if block_id not in self._block_meta_data:
+                assert block_id == seq_block_ids[-1]
+            else:
+                self._block_meta_data[block_id].last_accessed = now
 
 
 class PrefixCachingBlock(Block):
@@ -349,9 +432,11 @@ class PrefixCachingBlock(Block):
         assert_prefix_caching_block_or_none(prev_block)
 
         self._prev_block = prev_block
+        self._prev_num_tokens = 0
+        if prev_block:
+            self._prev_num_tokens = prev_block.num_tokens_total
         self._cached_content_hash: Optional[int] = None
         self._prefix_caching_allocator = prefix_caching_allocator
-
         self._block = NaiveBlock(
             prev_block=prev_block,
             token_ids=token_ids,
@@ -381,6 +466,10 @@ class PrefixCachingBlock(Block):
         if self.content_hash is not None:
             self.block_id = (self._prefix_caching_allocator.
                              promote_to_immutable_block(self))
+
+    @property
+    def num_tokens_total(self) -> int:
+        return self._prev_num_tokens + len(self.token_ids)
 
     @property
     def block_id(self) -> Optional[int]:

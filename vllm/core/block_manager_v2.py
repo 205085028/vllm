@@ -64,7 +64,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
-
         assert sliding_window is None, "Sliding window not yet supported"
 
         self.block_sliding_window = None
@@ -72,14 +71,15 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.watermark = watermark
         assert watermark >= 0.0
 
-        assert not enable_caching, "Prefix caching not yet supported"
         self.enable_caching = enable_caching
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
+        allocator_type = "naive"
+        if enable_caching:
+            allocator_type = "prefix_caching"
         self.block_allocator = CpuGpuBlockAllocator.create(
-            # Currently, only naive blocks are supported (no prefix caching).
-            allocator_type="naive",
+            allocator_type=allocator_type,
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
             block_size=block_size,
@@ -194,17 +194,18 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         assert all(b is not None for b in block_ids)
         return block_ids
 
-    def access_all_blocks_in_seq(self, seq, now):
-        # TODO add prefix caching support.
-        # Tracked here https://github.com/vllm-project/vllm/issues/3667
-        pass
+    def access_all_blocks_in_seq(self, seq: Sequence, now: float):
+        if self.enable_caching:
+            self.block_allocator.access_all_blocks_in_seq(
+                self.get_block_table(seq), now)
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         # We ignore the sequence group as its not necessary. After the batch is
         # formed by the scheduler, we do not need to mark blocks from individual
         # sequence groups as computed -- all blocks in the batch can be marked
         # as computed.
-        self.block_allocator.mark_blocks_as_computed()
+        if self.enable_caching:
+            self.block_allocator.mark_blocks_as_computed()
 
     def get_common_computed_block_ids(
             self, seqs: List[Sequence]) -> GenericSequence[int]:
@@ -217,6 +218,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         This method determines which blocks can be safely skipped for all
         sequences in the sequence group.
         """
+        if not self.enable_caching:
+            return []
         seq_block_ids = [
             self.block_tables[seq.seq_id].physical_block_ids for seq in seqs
         ]
