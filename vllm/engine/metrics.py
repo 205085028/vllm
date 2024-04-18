@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass
+from typing import Counter as CollectionsCounter
 from typing import Dict, List, Protocol
 
 import numpy as np
@@ -12,6 +13,8 @@ logger = init_logger(__name__)
 
 disable_created_metrics()
 
+LABEL_NAME_FINISHED_REASON = "finished_reason"
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the metrics definitions.
 
@@ -19,7 +22,7 @@ disable_created_metrics()
 # begin-metrics-definitions
 class Metrics:
 
-    def __init__(self, labelnames: List[str]):
+    def __init__(self, labelnames: List[str], max_model_len: int):
         # Unregister any existing vLLM collectors
         for collector in list(REGISTRY._collector_to_names):
             if hasattr(collector, "_name") and "vllm" in collector._name:
@@ -53,14 +56,22 @@ class Metrics:
             labelnames=labelnames)
 
         # Raw stats from last model iteration
-        self.counter_prompt_tokens = Counter(
-            name="vllm:prompt_tokens_total",
+        self.counter_request_success = Counter(
+            name="vllm:request_success",
+            documentation="Count of successfully processed requests.",
+            labelnames=labelnames + [LABEL_NAME_FINISHED_REASON])
+        self.histogram_request_prompt_tokens = Histogram(
+            name="vllm:request_prompt_tokens",
             documentation="Number of prefill tokens processed.",
-            labelnames=labelnames)
-        self.counter_generation_tokens = Counter(
-            name="vllm:generation_tokens_total",
+            labelnames=labelnames,
+            buckets=build_1_2_5_buckets(max_model_len),
+        )
+        self.histogram_request_generation_tokens = Histogram(
+            name="vllm:request_generation_tokens",
             documentation="Number of generation tokens processed.",
-            labelnames=labelnames)
+            labelnames=labelnames,
+            buckets=build_1_2_5_buckets(max_model_len),
+        )
         self.histogram_time_to_first_token = Histogram(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
@@ -82,6 +93,18 @@ class Metrics:
             documentation="Histogram of end to end request latency in seconds.",
             labelnames=labelnames,
             buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+        self.histogram_request_n = Histogram(
+            name="vllm:request_params_n",
+            documentation="Histogram of the n request parameter.",
+            labelnames=labelnames,
+            buckets=[1, 2, 5, 10, 20],
+        )
+        self.histogram_request_best_of = Histogram(
+            name="vllm:request_params_best_of",
+            documentation="Histogram of the best_of request parameter.",
+            labelnames=labelnames,
+            buckets=[1, 2, 5, 10, 20],
+        )
 
         # Legacy metrics
         self.gauge_avg_prompt_throughput = Gauge(
@@ -94,9 +117,41 @@ class Metrics:
             documentation="Average generation throughput in tokens/s.",
             labelnames=labelnames,
         )
+        # Deprecated in favor of vllm:request_prompt_tokens_sum
+        self.counter_prompt_tokens = Counter(
+            name="vllm:prompt_tokens_total",
+            documentation="Number of prefill tokens processed.",
+            labelnames=labelnames)
+        # Deprecated in favor of vllm:request_generation_tokens_sum
+        self.counter_generation_tokens = Counter(
+            name="vllm:generation_tokens_total",
+            documentation="Number of generation tokens processed.",
+            labelnames=labelnames)
 
 
 # end-metrics-definitions
+
+
+def build_1_2_5_buckets(max_value: int):
+    """
+    Builds a list of buckets with increasing powers of 10 multiplied by 
+    mantissa values (1, 2, 5) until the value exceeds the specified maximum.
+
+    Example:
+    >>> build_1_2_5_buckets(100)
+    [1, 2, 5, 10, 20, 50, 100]
+    """
+    mantissa_lst = [1, 2, 5]
+    exponent = 0
+    buckets = []
+    while True:
+        for m in mantissa_lst:
+            value = m * 10**exponent
+            if value <= max_value:
+                buckets.append(value)
+            else:
+                return buckets
+        exponent += 1
 
 
 @dataclass
@@ -112,8 +167,13 @@ class Stats:
     cpu_cache_usage: float
 
     # Raw stats from last model iteration.
+    finished_reason_counter: CollectionsCounter[str]
     num_prompt_tokens: int
     num_generation_tokens: int
+    num_prompt_tokens_lst: List[int]
+    num_generation_tokens_lst: List[int]
+    request_n: List[int]
+    request_best_of: List[int]
     time_to_first_tokens: List[float]
     time_per_output_tokens: List[float]
     time_e2e_requests: List[float]
@@ -128,7 +188,8 @@ class SupportsMetricsInfo(Protocol):
 class StatLogger:
     """StatLogger is used LLMEngine to log to Promethus and Stdout."""
 
-    def __init__(self, local_interval: float, labels: Dict[str, str]) -> None:
+    def __init__(self, local_interval: float, labels: Dict[str, str],
+                 max_model_len: int) -> None:
         # Metadata for logging locally.
         self.last_local_log = time.time()
         self.local_interval = local_interval
@@ -139,7 +200,8 @@ class StatLogger:
 
         # Prometheus metrics
         self.labels = labels
-        self.metrics = Metrics(labelnames=list(labels.keys()))
+        self.metrics = Metrics(labelnames=list(labels.keys()),
+                               max_model_len=max_model_len)
 
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         if type == "cache_config":
@@ -170,6 +232,29 @@ class StatLogger:
             stats.num_prompt_tokens)
         self.metrics.counter_generation_tokens.labels(**self.labels).inc(
             stats.num_generation_tokens)
+
+        # Add to request counters.
+        for finished_reason, count in stats.finished_reason_counter.items():
+            self.metrics.counter_request_success.labels(
+                **{
+                    **self.labels,
+                    LABEL_NAME_FINISHED_REASON: finished_reason,
+                }).inc(count)
+
+        # Observe number of tokens in histograms.
+        for val in stats.num_prompt_tokens_lst:
+            self.metrics.histogram_request_prompt_tokens.labels(
+                **self.labels).observe(val)
+        for val in stats.num_generation_tokens_lst:
+            self.metrics.histogram_request_generation_tokens.labels(
+                **self.labels).observe(val)
+
+        # Observe sampling params in histograms.
+        for n in stats.request_n:
+            self.metrics.histogram_request_n.labels(**self.labels).observe(n)
+        for best_of in stats.request_best_of:
+            self.metrics.histogram_request_best_of.labels(
+                **self.labels).observe(best_of)
 
         # Observe request level latencies in histograms.
         for ttft in stats.time_to_first_tokens:

@@ -1,4 +1,5 @@
 import time
+from collections import Counter as CollectionsCounter
 from typing import Iterable, List, Optional, Type, Union
 
 from transformers import PreTrainedTokenizer
@@ -22,7 +23,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
-                           SequenceGroup)
+                           SequenceGroup, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -187,7 +188,8 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger = StatLogger(
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-                labels=dict(model_name=model_config.model))
+                labels=dict(model_name=model_config.model),
+                max_model_len=self.model_config.max_model_len)
             self.stat_logger.info("cache_config", self.cache_config)
 
         # Create sequence output processor, e.g. for beam search or
@@ -575,26 +577,51 @@ class LLMEngine:
         # Iteration stats if we have scheduler output.
         num_prompt_tokens = 0
         num_generation_tokens = 0
+        num_prompt_tokens_lst = []
+        num_generation_tokens_lst = []
+        request_n = []
+        request_best_of = []
         time_to_first_tokens = []
         time_per_output_tokens = []
         time_e2e_requests = []
+        finished_reason_counter = CollectionsCounter()
         if scheduler_outputs is not None:
             prompt_run = scheduler_outputs.num_prefill_groups > 0
 
-            # Number of Tokens.
+            # Number of Tokens
             if prompt_run:
-                num_prompt_tokens = sum(
+                num_prompt_tokens_lst = [
                     len(scheduled_seq_group.seq_group.prompt_token_ids)
                     for scheduled_seq_group in
-                    scheduler_outputs.scheduled_seq_groups)
+                    scheduler_outputs.scheduled_seq_groups
+                ]
+                num_prompt_tokens = sum(num_prompt_tokens_lst)
                 num_generation_tokens = sum(
                     scheduled_seq_group.seq_group.num_seqs()
                     for scheduled_seq_group in
                     scheduler_outputs.scheduled_seq_groups)
             else:
                 num_generation_tokens = scheduler_outputs.num_batched_tokens
+                num_generation_tokens_lst = [
+                    seq.get_output_len() for scheduled_seq_group in
+                    scheduler_outputs.scheduled_seq_groups for seq in
+                    scheduled_seq_group.seq_group.get_finished_seqs()
+                ]
 
-            # Latency Timings.
+            # Sampling Params
+            if prompt_run:
+                request_n = [
+                    scheduled_seq_group.seq_group.sampling_params.n
+                    for scheduled_seq_group in
+                    scheduler_outputs.scheduled_seq_groups
+                ]
+                request_best_of = [
+                    scheduled_seq_group.seq_group.sampling_params.best_of
+                    for scheduled_seq_group in
+                    scheduler_outputs.scheduled_seq_groups
+                ]
+
+            # Latency Timings
             time_last_iters = []
             for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
                 seq_group = scheduled_seq_group.seq_group
@@ -609,6 +636,15 @@ class LLMEngine:
             time_to_first_tokens = time_last_iters if prompt_run else []
             time_per_output_tokens = [] if prompt_run else time_last_iters
 
+            # Finished Requests
+            for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+                if not scheduled_seq_group.seq_group.is_finished():
+                    continue
+                finished_reason_counter += CollectionsCounter([
+                    SequenceStatus.get_finished_reason(seq.status) for seq in
+                    scheduled_seq_group.seq_group.get_finished_seqs()
+                ])
+
         return Stats(
             now=now,
             num_running=num_running,
@@ -616,8 +652,13 @@ class LLMEngine:
             num_waiting=num_waiting,
             gpu_cache_usage=gpu_cache_usage,
             cpu_cache_usage=cpu_cache_usage,
+            finished_reason_counter=finished_reason_counter,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=num_generation_tokens,
+            num_prompt_tokens_lst=num_prompt_tokens_lst,
+            num_generation_tokens_lst=num_generation_tokens_lst,
+            request_n=request_n,
+            request_best_of=request_best_of,
             time_to_first_tokens=time_to_first_tokens,
             time_per_output_tokens=time_per_output_tokens,
             time_e2e_requests=time_e2e_requests,
