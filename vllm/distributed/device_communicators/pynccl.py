@@ -108,8 +108,7 @@ _c_ncclCommInitRank.argtypes = [
 ]
 
 
-# enums
-class ncclDataType_t(ctypes.c_int):
+class ncclDataType_t:
     ncclInt8 = 0
     ncclChar = 0
     ncclUint8 = 1
@@ -128,7 +127,7 @@ class ncclDataType_t(ctypes.c_int):
     ncclNumTypes = 10
 
     @classmethod
-    def from_torch(cls, dtype: torch.dtype) -> 'ncclDataType_t':
+    def from_torch(cls, dtype: torch.dtype) -> int:
         if dtype == torch.int8:
             return cls.ncclInt8
         if dtype == torch.uint8:
@@ -157,7 +156,7 @@ class ncclRedOp_t(ctypes.c_int):
     ncclNumOps = 5
 
     @classmethod
-    def from_torch(cls, op: ReduceOp) -> 'ncclRedOp_t':
+    def from_torch(cls, op: ReduceOp) -> int:
         if op == ReduceOp.SUM:
             return cls.ncclSum
         if op == ReduceOp.PRODUCT:
@@ -180,8 +179,8 @@ class ncclRedOp_t(ctypes.c_int):
 _c_ncclAllReduce = nccl.ncclAllReduce
 _c_ncclAllReduce.restype = ctypes.c_int
 _c_ncclAllReduce.argtypes = [
-    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ncclDataType_t,
-    ncclRedOp_t, ctypes.c_void_p, ctypes.c_void_p
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+    ctypes.c_void_p, ctypes.c_void_p
 ]
 
 # equivalent to c declaration:
