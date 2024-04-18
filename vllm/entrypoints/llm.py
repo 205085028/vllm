@@ -1,4 +1,4 @@
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Generator
 
 import torch
 from tqdm import tqdm
@@ -123,15 +123,14 @@ class LLM:
     ) -> None:
         self.llm_engine.tokenizer.tokenizer = tokenizer
 
-    def generate(
-        self,
-        prompts: Optional[Union[str, List[str]]] = None,
-        sampling_params: Optional[SamplingParams] = None,
-        prompt_token_ids: Optional[List[List[int]]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+    def generate(self,
+                 prompts: Optional[Union[str, List[str]]] = None,
+                 sampling_params: Optional[SamplingParams] = None,
+                 prompt_token_ids: Optional[List[List[int]]] = None,
+                 use_tqdm: bool = True,
+                 lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
-    ) -> List[RequestOutput]:
+                 stream: bool = False) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
         NOTE: This class automatically batches the given prompts, considering
@@ -191,7 +190,10 @@ class LLM:
                     data=multi_modal_data.data[i].unsqueeze(0))
                 if multi_modal_data else None,
             )
-        return self._run_engine(use_tqdm)
+        if stream:
+            return self._stream_engine()
+        else:
+            return self._run_engine(use_tqdm)
 
     def _add_request(
         self,
@@ -208,6 +210,12 @@ class LLM:
                                     prompt_token_ids,
                                     lora_request=lora_request,
                                     multi_modal_data=multi_modal_data)
+
+    def _stream_engine(self) -> Generator[RequestOutput, any, None]:
+        while self.llm_engine.has_unfinished_requests():
+            step_outputs = self.llm_engine.step()
+            for output in step_outputs:
+                yield output
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.
