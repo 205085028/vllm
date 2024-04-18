@@ -359,6 +359,46 @@ class TestPrefixCachingBlockAllocator:
             allocator.free(block)
 
     @staticmethod
+    @pytest.mark.parametrize("num_blocks", [1024])
+    @pytest.mark.parametrize("block_size", [16])
+    @pytest.mark.parametrize("seed", list(range(20)))
+    def test_mark_and_get_computed(num_blocks: int, block_size: int,
+                                   seed: int):
+        """Verify sharing occurs by allocating two sequences that share prefixes
+        and incrementally freeing blocks.
+        """
+        random.seed(seed)
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
+                                                block_size=block_size)
+        num_blocks_to_consume = random.randint(4, num_blocks - 1)
+
+        # Create token ids that will exhaust all blocks.
+        token_ids = list(range(num_blocks_to_consume * block_size))
+
+        first_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids,
+            allocator=allocator,
+        )
+        second_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids,
+            allocator=allocator,
+        )
+
+        first_computed_ids = [
+            first_chain[i].block_id for i in range(num_blocks_to_consume // 2)
+        ]
+        second_computed_ids = [
+            second_chain[i].block_id for i in range(num_blocks_to_consume // 4)
+        ]
+        allocator.mark_blocks_as_computed(
+            [first_computed_ids, second_computed_ids])
+        res = allocator.get_common_computed_block_ids(
+            [first_computed_ids, second_computed_ids])
+        assert (len(res) == num_blocks_to_consume // 4 - 1)
+
+    @staticmethod
     def create_immutable_chain(
         block_size: int,
         token_ids: List[int],

@@ -174,7 +174,7 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         return self._cow_tracker.clear_cows()
 
-    def mark_blocks_as_computed(self) -> None:
+    def mark_blocks_as_computed(self, seq_block_ids: List[List[int]]) -> None:
         """Mark blocks as computed, used in prefix caching.
 
         Since the naive allocator does not implement prefix caching, we do
