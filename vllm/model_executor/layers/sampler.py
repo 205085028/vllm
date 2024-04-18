@@ -243,6 +243,25 @@ def _greedy_sample(
     return results
 
 
+def _forced_sample(
+    selected_seq_groups: List[Tuple[List[int], SamplingParams]],
+    samples: torch.Tensor,
+) -> List[Tuple[List[int], List[int]]]:
+    samples = samples.tolist()
+    sample_idx = 0
+    results = []
+    for seq_group in selected_seq_groups:
+        seq_ids, _ = seq_group
+        num_parent_seqs = len(seq_ids)
+        assert num_parent_seqs == 1, (
+            "Deterministic sampling should have only one seq.")
+        parent_ids = list(range(num_parent_seqs))
+        next_token_ids = [samples[sample_idx]]
+        results.append((next_token_ids, parent_ids))
+        sample_idx += num_parent_seqs
+    return results
+
+
 def _random_sample(
     selected_seq_groups: List[Tuple[List[int], SamplingParams]],
     is_prompts: List[bool],
@@ -383,7 +402,14 @@ def _sample_with_torch(
         is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_ids]
         sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
                                           is_prompts, sample_indices)
-        if sampling_type == SamplingType.GREEDY:
+        if sampling_type == SamplingType.FORCED:
+            forced_samples = torch.tensor([
+                seq_groups[0][1].future_context[0][len(
+                    sampling_metadata.seq_data[seq_groups[0][0]
+                                               [0]].output_token_ids)]
+            ],
+                                          device='cuda:0')  #
+        elif sampling_type == SamplingType.GREEDY:
             greedy_samples = torch.argmax(logprobs[sample_indices.long()],
                                           dim=-1)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
@@ -412,7 +438,9 @@ def _sample_with_torch(
             continue
         seq_group_ids, seq_groups, is_prompts, sample_indices = sample_metadata[
             sampling_type]
-        if sampling_type == SamplingType.GREEDY:
+        if sampling_type == SamplingType.FORCED:
+            sample_results = _forced_sample(seq_groups, forced_samples)
+        elif sampling_type == SamplingType.GREEDY:
             sample_results = _greedy_sample(seq_groups, greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups, is_prompts,
