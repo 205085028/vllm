@@ -31,6 +31,8 @@ _MODELS = {
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
+    "QiyuanForCausalLM": ("zhinao", "ZhinaoForCausalLM"),
+    "ZhinaoForCausalLM": ("zhinao", "ZhinaoForCausalLM"),
     "LlavaForConditionalGeneration":
     ("llava", "LlavaForConditionalGeneration"),
     # For decapoda-research/llama-*
